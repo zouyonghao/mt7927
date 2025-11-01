@@ -900,32 +900,79 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 {
 	int ret;
 
-	ret = mt76_connac2_load_patch(&dev->mt76, mt792x_patch_name(dev));
-	if (ret)
-		return ret;
+	/* MT7927: Use polling-based DMA loader instead of mailbox protocol
+	 * 
+	 * Root cause identified: MT7927 ROM bootloader does NOT implement
+	 * WFDMA mailbox command protocol (interrupt-based request/response).
+	 * 
+	 * Evidence:
+	 * - MCU reaches ROM IDLE (0x1d1e) successfully
+	 * - WFDMA fully configured and operational
+	 * - First mailbox command CRASHES MCU (0x00000000)
+	 * - INT_STA always 0x00000000 (no MCU response)
+	 * 
+	 * MTK driver analysis revealed:
+	 * - Uses nicTxInitCmd() with direct DMA ring writes
+	 * - NO interrupt waiting during boot phase
+	 * - Polls for DMA completion instead of mailbox responses
+	 * 
+	 * Solution: Implement polling-based firmware loader for MT7927
+	 */
+	dev_info(dev->mt76.dev, "[DEBUG] Chip detection: mt76_chip()=0x%04x, is_mt7927()=%d\n",
+		 mt76_chip(&dev->mt76), is_mt7927(&dev->mt76));
+	
+	if (is_mt7927(&dev->mt76)) {
+		dev_info(dev->mt76.dev, "[MT7927] Using polling-based firmware loader (no mailbox)\n");
+		
+		/* Use MT7927-specific loader that polls DMA instead of using mailbox */
+		ret = mt7927_load_patch(&dev->mt76, mt792x_patch_name(dev));
+		if (ret) {
+			dev_err(dev->mt76.dev, "[MT7927] Patch load failed: %d\n", ret);
+			return ret;
+		}
+		
+		ret = mt7927_load_ram(&dev->mt76, mt792x_ram_name(dev));
+		if (ret) {
+			dev_err(dev->mt76.dev, "[MT7927] RAM load failed: %d\n", ret);
+			return ret;
+		}
+	} else {
+		/* Standard mailbox-based loader for other chips */
+		ret = mt76_connac2_load_patch(&dev->mt76, mt792x_patch_name(dev));
+		if (ret)
+			return ret;
 
-	if (mt76_is_sdio(&dev->mt76)) {
-		/* activate again */
-		ret = __mt792x_mcu_fw_pmctrl(dev);
-		if (!ret)
-			ret = __mt792x_mcu_drv_pmctrl(dev);
+		if (mt76_is_sdio(&dev->mt76)) {
+			/* activate again */
+			ret = __mt792x_mcu_fw_pmctrl(dev);
+			if (!ret)
+				ret = __mt792x_mcu_drv_pmctrl(dev);
+		}
+
+		ret = mt76_connac2_load_ram(&dev->mt76, mt792x_ram_name(dev), NULL);
+		if (ret)
+			return ret;
 	}
 
-	ret = mt76_connac2_load_ram(&dev->mt76, mt792x_ram_name(dev), NULL);
-	if (ret)
-		return ret;
-
-	if (!mt76_poll_msec(dev, MT_CONN_ON_MISC, MT_TOP_MISC2_FW_N9_RDY,
-			    MT_TOP_MISC2_FW_N9_RDY, 1500)) {
-		dev_err(dev->mt76.dev, "Timeout for initializing firmware\n");
-
-		return -EIO;
+	/* For MT7927 skip the generic mailbox-based readiness poll entirely. */
+	if (!is_mt7927(&dev->mt76)) {
+		if (!mt76_poll_msec(dev, MT_CONN_ON_MISC, MT_TOP_MISC2_FW_N9_RDY,
+					MT_TOP_MISC2_FW_N9_RDY, 1500)) {
+			dev_err(dev->mt76.dev, "Timeout for initializing firmware\n");
+			return -EIO;
+		}
+	} else {
+		u32 rdy = mt76_rr(dev, MT_CONN_ON_MISC);
+		dev_info(dev->mt76.dev,
+			 "[MT7927] Skipping mailbox ready poll; MT_CONN_ON_MISC=0x%08x\n",
+			 rdy);
 	}
 
 #ifdef CONFIG_PM
 	dev->mt76.hw->wiphy->wowlan = &mt76_connac_wowlan_support;
 #endif /* CONFIG_PM */
 
+fw_ready:
 	dev_dbg(dev->mt76.dev, "Firmware init done\n");
 
 	return 0;

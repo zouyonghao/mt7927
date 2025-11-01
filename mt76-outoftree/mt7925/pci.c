@@ -9,6 +9,7 @@
 #include "mac.h"
 #include "mcu.h"
 #include "../dma.h"
+#include "mt7927_regs.h"
 
 static const struct pci_device_id mt7925_pci_device_table[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, 0x7925),
@@ -112,7 +113,6 @@ static u32 __mt7925_reg_addr(struct mt792x_dev *dev, u32 addr)
 		{ 0x820c0000, 0x008000, 0x0004000 }, /* WF_UMAC_TOP (PLE) */
 		{ 0x820c8000, 0x00c000, 0x0002000 }, /* WF_UMAC_TOP (PSE) */
 		{ 0x820cc000, 0x00e000, 0x0002000 }, /* WF_UMAC_TOP (PP) */
-		{ 0x74030000, 0x010000, 0x0001000 }, /* PCIe MAC */
 		{ 0x820e0000, 0x020000, 0x0000400 }, /* WF_LMAC_TOP BN0 (WF_CFG) */
 		{ 0x820e1000, 0x020400, 0x0000200 }, /* WF_LMAC_TOP BN0 (WF_TRB) */
 		{ 0x820e2000, 0x020800, 0x0000400 }, /* WF_LMAC_TOP BN0 (WF_AGG) */
@@ -158,24 +158,92 @@ static u32 __mt7925_reg_addr(struct mt792x_dev *dev, u32 addr)
 		{ 0x7c500000, 0x060000, 0x2000000 }, /* remap */
 		{ 0x0, 0x0, 0x0 } /* End */
 	};
-	int i;
+	static const struct mt76_connac_reg_map fixed_map_mt7927[] = {
+		{ 0x830c0000, 0x000000, 0x0001000 }, /* WF_MCU_BUS_CR_REMAP */
+		{ 0x54000000, 0x002000, 0x0001000 }, /* WFDMA PCIE0 MCU DMA0 */
+		{ 0x55000000, 0x003000, 0x0001000 }, /* WFDMA PCIE0 MCU DMA1 */
+		{ 0x56000000, 0x004000, 0x0001000 }, /* WFDMA reserved */
+		{ 0x57000000, 0x005000, 0x0001000 }, /* WFDMA MCU wrap CR */
+		{ 0x58000000, 0x006000, 0x0001000 }, /* WFDMA PCIE1 MCU DMA0 (MEM_DMA) */
+		{ 0x59000000, 0x007000, 0x0001000 }, /* WFDMA PCIE1 MCU DMA1 */
+		{ 0x820c0000, 0x008000, 0x0004000 }, /* WF_UMAC_TOP (PLE) */
+		{ 0x820c8000, 0x00c000, 0x0002000 }, /* WF_UMAC_TOP (PSE) */
+		{ 0x820cc000, 0x00e000, 0x0002000 }, /* WF_UMAC_TOP (PP) */
+		{ 0x820e0000, 0x020000, 0x0000400 }, /* WF_LMAC_TOP BN0 (WF_CFG) */
+		{ 0x820e1000, 0x020400, 0x0000200 }, /* WF_LMAC_TOP BN0 (WF_TRB) */
+		{ 0x820e2000, 0x020800, 0x0000400 }, /* WF_LMAC_TOP BN0 (WF_AGG) */
+		{ 0x820e3000, 0x020c00, 0x0000400 }, /* WF_LMAC_TOP BN0 (WF_ARB) */
+		{ 0x820e4000, 0x021000, 0x0000400 }, /* WF_LMAC_TOP BN0 (WF_TMAC) */
+		{ 0x820e5000, 0x021400, 0x0000800 }, /* WF_LMAC_TOP BN0 (WF_RMAC) */
+		{ 0x820ce000, 0x021c00, 0x0000200 }, /* WF_LMAC_TOP (WF_SEC) */
+		{ 0x820e7000, 0x021e00, 0x0000200 }, /* WF_LMAC_TOP BN0 (WF_DMA) */
+		{ 0x820cf000, 0x022000, 0x0001000 }, /* WF_LMAC_TOP (WF_PF) */
+		{ 0x820e9000, 0x023400, 0x0000200 }, /* WF_LMAC_TOP BN0 (WF_WTBLOFF) */
+		{ 0x820ea000, 0x024000, 0x0000200 }, /* WF_LMAC_TOP BN0 (WF_ETBF) */
+		{ 0x820eb000, 0x024200, 0x0000400 }, /* WF_LMAC_TOP BN0 (WF_LPON) */
+		{ 0x820ec000, 0x024600, 0x0000200 }, /* WF_LMAC_TOP BN0 (WF_INT) */
+		{ 0x820ed000, 0x024800, 0x0000800 }, /* WF_LMAC_TOP BN0 (WF_MIB) */
+		{ 0x820ca000, 0x026000, 0x0002000 }, /* WF_LMAC_TOP BN0 (WF_MUCOP) */
+		{ 0x820d0000, 0x030000, 0x0010000 }, /* WF_LMAC_TOP (WF_WTBLON) */
+		{ 0x40000000, 0x070000, 0x0010000 }, /* WF_UMAC_SYSRAM */
+		{ 0x00400000, 0x080000, 0x0010000 }, /* WF_MCU_SYSRAM */
+		{ 0x00410000, 0x090000, 0x0010000 }, /* WF_MCU_SYSRAM (configure register) */
+		{ 0x820f0000, 0x0a0000, 0x0000400 }, /* WF_LMAC_TOP BN1 (WF_CFG) */
+		{ 0x820f1000, 0x0a0600, 0x0000200 }, /* WF_LMAC_TOP BN1 (WF_TRB) */
+		{ 0x820f2000, 0x0a0800, 0x0000400 }, /* WF_LMAC_TOP BN1 (WF_AGG) */
+		{ 0x820f3000, 0x0a0c00, 0x0000400 }, /* WF_LMAC_TOP BN1 (WF_ARB) */
+		{ 0x820f4000, 0x0a1000, 0x0000400 }, /* WF_LMAC_TOP BN1 (WF_TMAC) */
+		{ 0x820f5000, 0x0a1400, 0x0000800 }, /* WF_LMAC_TOP BN1 (WF_RMAC) */
+		{ 0x820f7000, 0x0a1e00, 0x0000200 }, /* WF_LMAC_TOP BN1 (WF_DMA) */
+		{ 0x820f9000, 0x0a3400, 0x0000200 }, /* WF_LMAC_TOP BN1 (WF_WTBLOFF) */
+		{ 0x820fa000, 0x0a4000, 0x0000200 }, /* WF_LMAC_TOP BN1 (WF_ETBF) */
+		{ 0x820fb000, 0x0a4200, 0x0000400 }, /* WF_LMAC_TOP BN1 (WF_LPON) */
+		{ 0x820fc000, 0x0a4600, 0x0000200 }, /* WF_LMAC_TOP BN1 (WF_INT) */
+		{ 0x820fd000, 0x0a4800, 0x0000800 }, /* WF_LMAC_TOP BN1 (WF_MIB) */
+		{ 0x820c4000, 0x0a8000, 0x0004000 }, /* WF_LMAC_TOP BN1 (WF_MUCOP) */
+		{ 0x820b0000, 0x0ae000, 0x0001000 }, /* [APB2] WFSYS_ON */
+		{ 0x80020000, 0x0b0000, 0x0010000 }, /* WF_TOP_MISC_OFF */
+		{ 0x81020000, 0x0c0000, 0x0010000 }, /* WF_TOP_MISC_ON */
+		{ 0x7c020000, 0x0d0000, 0x0010000 }, /* CONN_INFRA, wfdma */
+		{ 0x7c060000, 0x0e0000, 0x0010000 }, /* CONN_INFRA, conn_host_csr_top */
+		{ 0x7c000000, 0x0f0000, 0x0010000 }, /* CONN_INFRA */
+		{ 0x7c010000, 0x100000, 0x0010000 }, /* CONN_INFRA (includes CONN_CFG at 0x7C011000) */
+		{ 0x7c030000, 0x1a0000, 0x0010000 }, /* CONN_INFRA_ON_CCIF (for PCCIF/mailbox) */
+		{ 0x74030000, 0x010000, 0x0001000 }, /* PCIe MAC (MT6639/MT7927 CE/Linux, not mobile) */
+		{ 0x70000000, 0x1e0000, 0x0009000 }, /* MT6639/MT7927: CBTOP low range (includes 0x70010200 chip ID) */
+		{ 0x70020000, 0x1f0000, 0x0010000 }, /* Reserved for CBTOP, can't switch */
+		{ 0x7c500000, 0x060000, 0x2000000 }, /* remap */
+		{0x70000000, 0x1e0000, 0x9000},
+		{ 0x0, 0x0, 0x0 } /* End */
+	};
+	const struct mt76_connac_reg_map *map;
+	int i, map_size;
+
+	/* MT7927 needs different PCIe MAC mapping */
+	if (is_mt7927(&dev->mt76)) {
+		map = fixed_map_mt7927;
+		map_size = ARRAY_SIZE(fixed_map_mt7927);
+	} else {
+		map = fixed_map;
+		map_size = ARRAY_SIZE(fixed_map);
+	}
 
 	if (addr < 0x200000)
 		return addr;
 
 	mt7925_reg_remap_restore(dev);
 
-	for (i = 0; i < ARRAY_SIZE(fixed_map); i++) {
+	for (i = 0; i < map_size; i++) {
 		u32 ofs;
 
-		if (addr < fixed_map[i].phys)
+		if (addr < map[i].phys)
 			continue;
 
-		ofs = addr - fixed_map[i].phys;
-		if (ofs > fixed_map[i].size)
+		ofs = addr - map[i].phys;
+		if (ofs > map[i].size)
 			continue;
 
-		return fixed_map[i].maps + ofs;
+		return map[i].maps + ofs;
 	}
 
 	if ((addr >= 0x18000000 && addr < 0x18c00000) ||
@@ -208,6 +276,80 @@ static u32 mt7925_rmw(struct mt76_dev *mdev, u32 offset, u32 mask, u32 val)
 	u32 addr = __mt7925_reg_addr(dev, offset);
 
 	return dev->bus_ops->rmw(mdev, addr, mask, val);
+}
+
+static int mt7927_wfsys_reset(struct mt792x_dev *dev)
+{
+	struct mt76_dev *mdev = &dev->mt76;
+	u32 val;
+	int i;
+
+	dev_info(mdev->dev, "MT7927: Performing WF/BT subsystem reset (MTK sequence)\n");
+
+	/* GPIO mode configuration */
+	mt76_wr(dev, CBTOP_GPIO_MODE5_MOD_ADDR, MT7927_GPIO_MODE5_VALUE);
+	mt76_wr(dev, CBTOP_GPIO_MODE6_MOD_ADDR, MT7927_GPIO_MODE6_VALUE);
+	usleep_range(100, 200);
+
+	/* BT subsystem reset */
+	mt76_wr(dev, CB_INFRA_RGU_BT_SUBSYS_RST_ADDR, MT7927_BT_SUBSYS_RST_ASSERT);
+	msleep(10);
+	mt76_wr(dev, CB_INFRA_RGU_BT_SUBSYS_RST_ADDR, MT7927_BT_SUBSYS_RST_DEASSERT);
+	msleep(10);
+
+	/* WF subsystem reset */
+	mt76_wr(dev, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR, MT7927_WF_SUBSYS_RST_ASSERT);
+	msleep(10);
+	mt76_wr(dev, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR, MT7927_WF_SUBSYS_RST_DEASSERT);
+	msleep(50);
+
+	/* Step 3: Second WF reset - exact MTK mt6639_mcu_reset sequence */
+	/* RMW on WF_SUBSYS_RST bit only, preserve all other bits */
+	dev_info(mdev->dev, "MT7927: Performing second WF reset (MTK RMW on bit 4)\n");
+
+	/* Read current value */
+	val = mt76_rr(dev, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR);
+	dev_info(mdev->dev, "MT7927: WF_SUBSYS_RST read = 0x%08x\n", val);
+
+	/* Assert reset: clear mask, then set bit */
+	val &= ~CB_INFRA_RGU_WF_SUBSYS_RST_WF_SUBSYS_RST_MASK;
+	val |= (1 << CB_INFRA_RGU_WF_SUBSYS_RST_WF_SUBSYS_RST_SHFT);
+	mt76_wr(dev, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR, val);
+	dev_info(mdev->dev, "MT7927: WF_SUBSYS_RST wrote 0x%08x (reset asserted)\n", val);
+	msleep(1);
+
+	/* Read again - hardware may modify register during reset */
+	val = mt76_rr(dev, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR);
+	dev_info(mdev->dev, "MT7927: WF_SUBSYS_RST read after 1ms = 0x%08x\n", val);
+
+	/* De-assert reset: clear mask, then set to 0 */
+	val &= ~CB_INFRA_RGU_WF_SUBSYS_RST_WF_SUBSYS_RST_MASK;
+	val |= (0 << CB_INFRA_RGU_WF_SUBSYS_RST_WF_SUBSYS_RST_SHFT);
+	mt76_wr(dev, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR, val);
+	dev_info(mdev->dev, "MT7927: WF_SUBSYS_RST wrote 0x%08x (reset de-asserted)\n", val);
+	msleep(10);
+
+	dev_info(mdev->dev, "MT7927: WF_SUBSYS_RST final value = 0x%08x\n",
+		 mt76_rr(dev, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR));
+
+	/* Verify CONN_SEMAPHORE after reset (should be 0x0 per MTK code) */
+	val = mt76_rr(dev, CONN_SEMAPHORE_CONN_SEMA_OWN_BY_M0_STA_REP_1_ADDR);
+	dev_info(mdev->dev, "MT7927: CONN_SEMAPHORE = 0x%08x (should be 0x0)\n", val);
+	if (val & CONN_SEMAPHORE_CONN_SEMA_OWN_BY_M0_STA_REP_1_CONN_SEMA00_OWN_BY_M0_STA_REP_MASK)
+		dev_err(mdev->dev, "MT7927: L0.5 reset failed - semaphore owned by MCU\n");
+
+	/* Wait for WF init done */
+	for (i = 0; i < 500; i++) {
+		val = mt76_rr(dev, CONN_INFRA_CFG_ON_CONN_INFRA_CFG_AP2WF_BUS_ADDR);
+		if (val & CONN_INFRA_CFG_ON_CONN_INFRA_CFG_AP2WF_BUS_WFSYS_SW_INIT_DONE) {
+			dev_info(mdev->dev, "MT7927: WF subsystem init done (reg=0x%08x)\n", val);
+			return 0;
+		}
+		msleep(1);
+	}
+
+	dev_err(mdev->dev, "MT7927: WF subsystem init timeout (reg=0x%08x)\n", val);
+	return -ETIMEDOUT;
 }
 
 static int mt7925_dma_init(struct mt792x_dev *dev)
@@ -401,46 +543,48 @@ static int mt7925_pci_probe(struct pci_dev *pdev,
 		dev_info(mdev->dev, "MT7927 detected, initializing CBInfra remap registers\n");
 
 		/* Set CBInfra PCIe remap using custom bus ops (with L1 windowing) */
-		mt76_wr(dev, 0x70026554, 0x74037001);  /* CBTOP_PCIE_REMAP_WF */
-		mt76_wr(dev, 0x70026558, 0x70007000);  /* CBTOP_PCIE_REMAP_WF_BT */
+		mt76_wr(dev, CB_INFRA_MISC0_CBTOP_PCIE_REMAP_WF_ADDR,
+			MT7927_CBTOP_PCIE_REMAP_WF_VALUE);
+		mt76_wr(dev, CB_INFRA_MISC0_CBTOP_PCIE_REMAP_WF_BT_ADDR,
+			MT7927_CBTOP_PCIE_REMAP_WF_BT_VALUE);
 
 		/* Verify the remap was set correctly */
-		val = mt76_rr(dev, 0x70026554);
+		val = mt76_rr(dev, CB_INFRA_MISC0_CBTOP_PCIE_REMAP_WF_ADDR);
 		dev_info(mdev->dev, "MT7927: CBTOP_PCIE_REMAP_WF    = 0x%08x\n", val);
-		val = mt76_rr(dev, 0x70026558);
+		val = mt76_rr(dev, CB_INFRA_MISC0_CBTOP_PCIE_REMAP_WF_BT_ADDR);
 		dev_info(mdev->dev, "MT7927: CBTOP_PCIE_REMAP_WF_BT = 0x%08x\n", val);
 
-		/* Set PCIE2AP remap for MCIF interrupt */
-		dev_info(mdev->dev, "MT7927: Setting PCIE2AP remap\n");
-		mt76_wr(dev, 0x7c021034, 0x18051803);
-		val = mt76_rr(dev, 0x7c021034);
-		dev_info(mdev->dev, "MT7927: PCIE2AP_REMAP_WF_1_BA = 0x%08x\n", val);
-
-		/* MCU initialization will be done later by mt7927e_mcu_init */
+		/* PCIE2AP remap will be set in mcu_init AFTER MCU reaches IDLE */
+		/* This is critical - MTK sets this AFTER reset but BEFORE firmware load */
 	}
 
 	if (!mt7925_disable_aspm && mt76_pci_aspm_supported(pdev))
 		dev->aspm_supported = true;
 
-	/* For MT7927, skip power control - will be done in mt7927e_mcu_init */
-	if (pdev->device != 0x7927) {
-		ret = __mt792x_mcu_fw_pmctrl(dev);
-		if (ret)
-			goto err_free_dev;
+	/* Power control - needed for all devices before DMA init */
+	ret = __mt792x_mcu_fw_pmctrl(dev);
+	if (ret)
+		goto err_free_dev;
 
-		ret = __mt792xe_mcu_drv_pmctrl(dev);
-		if (ret)
-			goto err_free_dev;
-	}
+	ret = __mt792xe_mcu_drv_pmctrl(dev);
+	if (ret)
+		goto err_free_dev;
 
 	mdev->rev = (mt76_rr(dev, MT_HW_CHIPID) << 16) |
 		    (mt76_rr(dev, MT_HW_REV) & 0xff);
 
 	dev_info(mdev->dev, "ASIC revision: %04x\n", mdev->rev);
 
-	mt76_rmw_field(dev, MT_HW_EMI_CTL, MT_HW_EMI_CTL_SLPPROT_EN, 1);
+	/* MT_HW_EMI_CTL is MT7925-specific, skip for MT7927/MT6639 */
+	if (pdev->device != 0x7927) {
+		mt76_rmw_field(dev, MT_HW_EMI_CTL, MT_HW_EMI_CTL_SLPPROT_EN, 1);
+	}
 
-	ret = mt792x_wfsys_reset(dev);
+	/* Use MT7927-specific reset for device 0x7927, standard reset for others */
+	if (pdev->device == 0x7927)
+		ret = mt7927_wfsys_reset(dev);
+	else
+		ret = mt792x_wfsys_reset(dev);
 	if (ret)
 		goto err_free_dev;
 
@@ -452,6 +596,21 @@ static int mt7925_pci_probe(struct pci_dev *pdev,
 			       IRQF_SHARED, KBUILD_MODNAME, dev);
 	if (ret)
 		goto err_free_dev;
+
+	/* MT7927: Pre-initialize MCU (check IDLE) before DMA setup */
+	if (pdev->device == 0x7927) {
+		dev_info(mdev->dev, "MT7927: Running pre-initialization sequence\n");
+		mt7927e_mcu_pre_init(dev);
+		dev_info(mdev->dev, "MT7927: Pre-initialization complete, proceeding with DMA setup\n");
+	}
+
+	/* MT7927: Configure PCIe MAC interrupt routing after IRQ setup (mt6639InitPcieInt) */
+	if (pdev->device == 0x7927) {
+		dev_info(mdev->dev, "MT7927: Configuring PCIe MAC interrupt routing (post-IRQ)\n");
+		mt76_wr(dev, MT7927_PCIE_MAC_INT_CONFIG_ADDR, MT7927_PCIE_MAC_INT_CONFIG_VALUE);
+		dev_info(mdev->dev, "  PCIE_MAC[0x%x] = 0x%08x\n",
+			 MT7927_PCIE_MAC_INT_CONFIG_ADDR, MT7927_PCIE_MAC_INT_CONFIG_VALUE);
+	}
 
 	ret = mt7925_dma_init(dev);
 	if (ret)
@@ -589,6 +748,12 @@ static int mt7925_pci_resume(struct device *device)
 
 	mt792x_wpdma_reinit_cond(dev);
 
+	/* MT7927: Reconfigure PCIe MAC interrupt routing after resume */
+	if (pdev->device == 0x7927) {
+		dev_info(mdev->dev, "MT7927: Reconfiguring PCIe MAC interrupt routing (resume)\n");
+		mt76_wr(dev, MT7927_PCIE_MAC_INT_CONFIG_ADDR, MT7927_PCIE_MAC_INT_CONFIG_VALUE);
+	}
+
 	/* enable interrupt */
 	mt76_wr(dev, MT_PCIE_MAC_INT_ENABLE, 0xff);
 	mt76_connac_irq_enable(&dev->mt76,
@@ -657,6 +822,8 @@ module_pci_driver(mt7925_pci_driver);
 MODULE_DEVICE_TABLE(pci, mt7925_pci_device_table);
 MODULE_FIRMWARE(MT7925_FIRMWARE_WM);
 MODULE_FIRMWARE(MT7925_ROM_PATCH);
+MODULE_FIRMWARE(MT7927_FIRMWARE_WM);
+MODULE_FIRMWARE(MT7927_ROM_PATCH);
 MODULE_AUTHOR("Deren Wu <deren.wu@mediatek.com>");
 MODULE_AUTHOR("Lorenzo Bianconi <lorenzo@kernel.org>");
 MODULE_DESCRIPTION("MediaTek MT7925E (PCIe) wireless driver");

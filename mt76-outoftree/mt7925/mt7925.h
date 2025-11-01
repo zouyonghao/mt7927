@@ -346,5 +346,8 @@ int mt7925_mcu_wtbl_update_hdr_trans(struct mt792x_dev *dev,
 				     struct ieee80211_vif *vif,
 				     struct ieee80211_sta *sta,
 				     int link_id);
+int mt7927_read_efuse_config(struct mt792x_dev *dev);
+void mt7927_set_default_nic_capability(struct mt792x_dev *dev);
+void mt7927e_mcu_pre_init(struct mt792x_dev *dev);
 
 #endif

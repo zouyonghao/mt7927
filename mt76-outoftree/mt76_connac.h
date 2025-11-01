@@ -177,6 +177,12 @@ static inline bool is_mt7925(struct mt76_dev *dev)
 	return mt76_chip(dev) == 0x7925;
 }
 
+static inline bool is_mt7927(struct mt76_dev *dev)
+{
+	/* MT7927 has ASIC revision 0x720072, so mt76_chip() returns 0x72 */
+	return mt76_chip(dev) == 0x72;
+}
+
 static inline bool is_mt7920(struct mt76_dev *dev)
 {
 	return mt76_chip(dev) == 0x7920;

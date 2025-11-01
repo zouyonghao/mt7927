@@ -33,7 +33,7 @@ mt76x02-usb-y := mt76x02_usb_mcu.o mt76x02_usb_core.o
 mt76-connac-lib-y := mt76_connac_mcu.o mt76_connac_mac.o mt76_connac3_mac.o
 
 mt792x-lib-y := mt792x_core.o mt792x_mac.o mt792x_trace.o \
-		mt792x_debugfs.o mt792x_dma.o
+		mt792x_debugfs.o mt792x_dma.o mt7927_fw_load.o
 mt792x-lib-$(CONFIG_ACPI) += mt792x_acpi_sar.o
 mt792x-usb-y := mt792x_usb.o
 

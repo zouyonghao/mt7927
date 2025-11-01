@@ -156,9 +156,20 @@ static int __mt7925_init_hardware(struct mt792x_dev *dev)
 
 	mt76_eeprom_override(&dev->mphy);
 
-	ret = mt7925_mcu_set_eeprom(dev);
-	if (ret)
-		goto out;
+	/* MT7927: Skip mcu_set_eeprom since it requires mailbox commands.
+	 * The MCU doesn't support mailbox protocol, so we read EFUSE directly
+	 * via memory-mapped registers instead (like MTK's MT6639 driver). */
+	if (!is_mt7927(&dev->mt76)) {
+		ret = mt7925_mcu_set_eeprom(dev);
+		if (ret)
+			goto out;
+	} else {
+		dev_info(dev->mt76.dev, "MT7927: Reading EFUSE directly (mailbox not supported)\n");
+		/* Read MAC address and capabilities from EFUSE registers */
+		ret = mt7927_read_efuse_config(dev);
+		if (ret)
+			dev_warn(dev->mt76.dev, "MT7927: EFUSE read failed, using defaults\n");
+	}
 
 	ret = mt7925_mac_init(dev);
 	if (ret)
@@ -229,16 +240,25 @@ static void mt7925_init_work(struct work_struct *work)
 		return;
 	}
 
-	ret = mt7925_mcu_set_thermal_protect(dev);
-	if (ret) {
-		dev_err(dev->mt76.dev, "thermal protection enable failed\n");
-		return;
+	/* MT7927: skip thermal protect CHIP_CONFIG to avoid mailbox timeouts */
+	if (!is_mt7927(&dev->mt76)) {
+		ret = mt7925_mcu_set_thermal_protect(dev);
+		if (ret) {
+			dev_err(dev->mt76.dev, "thermal protection enable failed\n");
+			return;
+		}
+	} else {
+		dev_info(dev->mt76.dev, "[MT7927] Skipping thermal protect (no mailbox)\n");
 	}
 
 	/* we support chip reset now */
 	dev->hw_init_done = true;
 
-	mt7925_mcu_set_deep_sleep(dev, dev->pm.ds_enable);
+	/* MT7927: skip deep sleep CHIP_CONFIG to avoid mailbox timeouts */
+	if (!is_mt7927(&dev->mt76))
+		mt7925_mcu_set_deep_sleep(dev, dev->pm.ds_enable);
+	else
+		dev_info(dev->mt76.dev, "[MT7927] Skipping deep sleep setup (no mailbox)\n");
 }
 
 int mt7925_register_device(struct mt792x_dev *dev)

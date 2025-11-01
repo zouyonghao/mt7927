@@ -28,9 +28,14 @@ int mt76_connac_mcu_patch_sem_ctrl(struct mt76_dev *dev, bool get)
 	} req = {
 		.op = cpu_to_le32(op),
 	};
+	int ret;
 
-	return mt76_mcu_send_msg(dev, MCU_CMD(PATCH_SEM_CONTROL),
+	dev_info(dev->dev, "[MCU_CMD] patch_sem_ctrl: op=%s (0x%02x)\n",
+		 get ? "GET" : "RELEASE", op);
+	ret = mt76_mcu_send_msg(dev, MCU_CMD(PATCH_SEM_CONTROL),
 				 &req, sizeof(req), true);
+	dev_info(dev->dev, "[MCU_CMD] patch_sem_ctrl result: %d\n", ret);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_patch_sem_ctrl);
 
@@ -42,9 +47,13 @@ int mt76_connac_mcu_start_patch(struct mt76_dev *dev)
 	} req = {
 		.check_crc = 0,
 	};
+	int ret;
 
-	return mt76_mcu_send_msg(dev, MCU_CMD(PATCH_FINISH_REQ),
+	dev_info(dev->dev, "[MCU_CMD] start_patch: Sending PATCH_FINISH_REQ\n");
+	ret = mt76_mcu_send_msg(dev, MCU_CMD(PATCH_FINISH_REQ),
 				 &req, sizeof(req), true);
+	dev_info(dev->dev, "[MCU_CMD] start_patch result: %d\n", ret);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_start_patch);
 
@@ -63,17 +72,23 @@ int mt76_connac_mcu_init_download(struct mt76_dev *dev, u32 addr, u32 len,
 		.mode = cpu_to_le32(mode),
 	};
 	int cmd;
+	int ret;
 
 	if ((!is_connac_v1(dev) && addr == MCU_PATCH_ADDRESS) ||
 	    (is_mt7921(dev) && addr == 0x900000) ||
 	    (is_mt7925(dev) && (addr == 0x900000 || addr == 0xe0002800)) ||
+	    (is_mt7927(dev) && (addr == 0x900000 || addr == 0xe0002800)) ||
 	    (is_mt7996(dev) && addr == 0x900000) ||
 	    (is_mt7992(dev) && addr == 0x900000))
 		cmd = MCU_CMD(PATCH_START_REQ);
 	else
 		cmd = MCU_CMD(TARGET_ADDRESS_LEN_REQ);
 
-	return mt76_mcu_send_msg(dev, cmd, &req, sizeof(req), true);
+	dev_info(dev->dev, "[MCU_CMD] init_download: addr=0x%08x, len=%u, mode=0x%x, cmd=0x%08x\n",
+		 addr, len, mode, cmd);
+	ret = mt76_mcu_send_msg(dev, cmd, &req, sizeof(req), true);
+	dev_info(dev->dev, "[MCU_CMD] init_download result: %d\n", ret);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_init_download);
 
@@ -1146,6 +1161,12 @@ int mt76_connac_mcu_uni_add_dev(struct mt76_phy *phy,
 				bool enable)
 {
 	struct mt76_dev *dev = phy->dev;
+
+	/* MT7927/MT7929: ROM/RAM mailbox acks are not supported.
+	 * Skip DEV_INFO_UPDATE/BSS_INFO_UPDATE to avoid repeated timeouts.
+	 */
+	if (is_mt7927(dev))
+		return 0;
 	struct {
 		struct {
 			u8 omac_idx;
@@ -1460,6 +1481,11 @@ mt76_connac_mcu_uni_bss_he_tlv(struct mt76_phy *phy, struct ieee80211_vif *vif,
 int mt76_connac_mcu_uni_set_chctx(struct mt76_phy *phy, struct mt76_vif_link *mvif,
 				  struct ieee80211_chanctx_conf *ctx)
 {
+	/* MT7927/MT7929: firmware mailbox is not usable at runtime. Skip
+	 * BSS_INFO_UPDATE channel context to avoid timeouts.
+	 */
+	if (is_mt7927(phy->dev))
+		return 0;
 	struct cfg80211_chan_def *chandef = ctx ? &ctx->def : &phy->chandef;
 	int freq1 = chandef->center_freq1, freq2 = chandef->center_freq2;
 	enum nl80211_band band = chandef->chan->band;
@@ -1545,6 +1571,11 @@ int mt76_connac_mcu_uni_add_bss(struct mt76_phy *phy,
 				bool enable,
 				struct ieee80211_chanctx_conf *ctx)
 {
+	/* MT7927/MT7929: firmware mailbox is not usable at runtime. Skip
+	 * BSS setup to avoid unified command timeouts.
+	 */
+	if (is_mt7927(phy->dev))
+		return 0;
 	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct cfg80211_chan_def *chandef = ctx ? &ctx->def : &phy->chandef;
 	enum nl80211_band band = chandef->chan->band;
@@ -3010,7 +3041,7 @@ static u32 mt76_connac2_get_data_mode(struct mt76_dev *dev, u32 info)
 {
 	u32 mode = DL_MODE_NEED_RSP;
 
-	if ((!is_mt7921(dev) && !is_mt7925(dev)) || info == PATCH_SEC_NOT_SUPPORT)
+	if ((!is_mt7921(dev) && !is_mt7925(dev) && !is_mt7927(dev)) || info == PATCH_SEC_NOT_SUPPORT)
 		return mode;
 
 	switch (FIELD_GET(PATCH_SEC_ENC_TYPE_MASK, info)) {
@@ -3040,16 +3071,111 @@ int mt76_connac2_load_patch(struct mt76_dev *dev, const char *fw_name)
 	const struct mt76_connac2_patch_hdr *hdr;
 	const struct firmware *fw = NULL;
 
+	dev_info(dev->dev, "[FW_LOAD] Step 1: Requesting patch semaphore...\n");
 	sem = mt76_connac_mcu_patch_sem_ctrl(dev, true);
+	dev_info(dev->dev, "[FW_LOAD] Semaphore result: %d (0=IS_DL, 1=SUCCESS, other=FAIL)\n", sem);
 	switch (sem) {
 	case PATCH_IS_DL:
+		dev_info(dev->dev, "[FW_LOAD] Patch already loaded\n");
 		return 0;
 	case PATCH_NOT_DL_SEM_SUCCESS:
+		dev_info(dev->dev, "[FW_LOAD] Semaphore acquired, continuing...\n");
 		break;
 	default:
 		dev_err(dev->dev, "Failed to get patch semaphore\n");
 		return -EAGAIN;
 	}
+
+	dev_info(dev->dev, "[FW_LOAD] Step 2: Loading firmware file: %s\n", fw_name);
+	ret = request_firmware(&fw, fw_name, dev->dev);
+	if (ret)
+		goto out;
+
+	if (!fw || !fw->data || fw->size < sizeof(*hdr)) {
+		dev_err(dev->dev, "Invalid firmware\n");
+		ret = -EINVAL;
+		goto out;
+	}
+
+	hdr = (const void *)fw->data;
+	dev_info(dev->dev, "[FW_LOAD] Step 3: Firmware loaded - size=%zu, HW/SW Version: 0x%x, Build: %.16s\n",
+		 fw->size, be32_to_cpu(hdr->hw_sw_ver), hdr->build_date);
+	dev_info(dev->dev, "[FW_LOAD] Number of regions to load: %d\n", be32_to_cpu(hdr->desc.n_region));
+
+	for (i = 0; i < be32_to_cpu(hdr->desc.n_region); i++) {
+		struct mt76_connac2_patch_sec *sec;
+		u32 len, addr, mode;
+		const u8 *dl;
+		u32 sec_info;
+
+		sec = (void *)(fw->data + sizeof(*hdr) + i * sizeof(*sec));
+		if ((be32_to_cpu(sec->type) & PATCH_SEC_TYPE_MASK) !=
+		    PATCH_SEC_TYPE_INFO) {
+			ret = -EINVAL;
+			goto out;
+		}
+
+		addr = be32_to_cpu(sec->info.addr);
+		len = be32_to_cpu(sec->info.len);
+		dl = fw->data + be32_to_cpu(sec->offs);
+		sec_info = be32_to_cpu(sec->info.sec_key_idx);
+		mode = mt76_connac2_get_data_mode(dev, sec_info);
+
+		dev_info(dev->dev, "[FW_LOAD] Step 4.%d: Init download - addr=0x%08x, len=%u, mode=0x%x\n",
+			 i, addr, len, mode);
+		ret = mt76_connac_mcu_init_download(dev, addr, len, mode);
+		if (ret) {
+			dev_err(dev->dev, "[FW_LOAD] FAIL at init_download for region %d\n", i);
+			goto out;
+		}
+
+		dev_info(dev->dev, "[FW_LOAD] Step 5.%d: Sending firmware scatter (len=%u)...\n", i, len);
+		ret = __mt76_mcu_send_firmware(dev, MCU_CMD(FW_SCATTER),
+					       dl, len, max_len);
+		if (ret) {
+			dev_err(dev->dev, "[FW_LOAD] FAIL at send_firmware for region %d\n", i);
+			goto out;
+		}
+		dev_info(dev->dev, "[FW_LOAD] Region %d sent successfully\n", i);
+	}
+
+	dev_info(dev->dev, "[FW_LOAD] Step 6: Starting patch...\n");
+	ret = mt76_connac_mcu_start_patch(dev);
+	if (ret)
+		dev_err(dev->dev, "[FW_LOAD] FAIL at start_patch\n");
+	else
+		dev_info(dev->dev, "[FW_LOAD] Patch started successfully\n");
+
+out:
+	dev_info(dev->dev, "[FW_LOAD] Step 7: Releasing semaphore...\n");
+	sem = mt76_connac_mcu_patch_sem_ctrl(dev, false);
+	dev_info(dev->dev, "[FW_LOAD] Semaphore release result: %d\n", sem);
+	switch (sem) {
+	case PATCH_REL_SEM_SUCCESS:
+		break;
+	default:
+		ret = -EAGAIN;
+		dev_err(dev->dev, "Failed to release patch semaphore\n");
+		break;
+	}
+
+	release_firmware(fw);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt76_connac2_load_patch);
+
+/* MT7927/MT6639-specific patch loader that bypasses semaphore control
+ * This is needed because MT7927 requires CCIF initialization before
+ * MCU communication works, but we can try direct firmware loading
+ */
+int mt76_connac2_load_patch_no_sem(struct mt76_dev *dev, const char *fw_name)
+{
+	int i, ret, max_len = mt76_is_sdio(dev) ? 2048 : 4096;
+	const struct mt76_connac2_patch_hdr *hdr;
+	const struct firmware *fw = NULL;
+
+	dev_info(dev->dev, "MT7927: Loading patch WITHOUT semaphore control (experimental)\n");
 
 	ret = request_firmware(&fw, fw_name, dev->dev);
 	if (ret)
@@ -3084,6 +3210,9 @@ int mt76_connac2_load_patch(struct mt76_dev *dev, const char *fw_name)
 		sec_info = be32_to_cpu(sec->info.sec_key_idx);
 		mode = mt76_connac2_get_data_mode(dev, sec_info);
 
+		dev_info(dev->dev, "MT7927: Region %d - addr=0x%x len=%u mode=0x%x\n",
+			 i, addr, len, mode);
+
 		ret = mt76_connac_mcu_init_download(dev, addr, len, mode);
 		if (ret) {
 			dev_err(dev->dev, "Download request failed\n");
@@ -3098,26 +3227,19 @@ int mt76_connac2_load_patch(struct mt76_dev *dev, const char *fw_name)
 		}
 	}
 
+	dev_info(dev->dev, "MT7927: Patch data sent, attempting to start patch\n");
 	ret = mt76_connac_mcu_start_patch(dev);
 	if (ret)
 		dev_err(dev->dev, "Failed to start patch\n");
+	else
+		dev_info(dev->dev, "MT7927: Patch started successfully!\n");
 
 out:
-	sem = mt76_connac_mcu_patch_sem_ctrl(dev, false);
-	switch (sem) {
-	case PATCH_REL_SEM_SUCCESS:
-		break;
-	default:
-		ret = -EAGAIN;
-		dev_err(dev->dev, "Failed to release patch semaphore\n");
-		break;
-	}
-
 	release_firmware(fw);
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mt76_connac2_load_patch);
+EXPORT_SYMBOL_GPL(mt76_connac2_load_patch_no_sem);
 
 int mt76_connac2_mcu_fill_message(struct mt76_dev *dev, struct sk_buff *skb,
 				  int cmd, int *wait_seq)

@@ -103,6 +103,8 @@ retry:
 		goto out;
 	}
 
+	dev_dbg(dev->dev, "[MCU_WAIT] Waiting for response to cmd 0x%08x (seq %d), timeout=%ums\n",
+		cmd, seq, jiffies_to_msecs(dev->mcu.timeout));
 	expires = jiffies + dev->mcu.timeout;
 
 	do {

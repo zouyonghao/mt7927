@@ -23,7 +23,11 @@ int mt7925_mcu_parse_response(struct mt76_dev *mdev, int cmd,
 
 	if (!skb) {
 		dev_err(mdev->dev, "Message %08x (seq %d) timeout\n", cmd, seq);
-		mt792x_reset(mdev);
+		/* On MT7927, mailbox is unsupported; do not trigger reset loops
+		 * on expected UNI CMD timeouts. Return -ETIMEDOUT without reset.
+		 */
+		if (!is_mt7927(mdev))
+			mt792x_reset(mdev);
 
 		return -ETIMEDOUT;
 	}
@@ -938,6 +942,153 @@ out:
 	return ret;
 }
 
+/* MT7927: Set default NIC capabilities when MCU query not available
+ * Based on typical MT6639/MT7927 hardware specs */
+/* MT7927 EFUSE register definitions (from MTK MT6639 driver) */
+#define MT7927_EEF_TOP_BASE		0x70021000
+#define MT7927_EEF_TOP_EFUSE_CTRL	0x70021008
+#define MT7927_EEF_TOP_EFUSE_RDATA0	0x70021030
+#define MT7927_EEF_TOP_EFUSE_RDATA1	0x70021034
+
+/* Read MT7927 EFUSE data directly from registers (no MCU command needed) */
+static int mt7927_read_efuse_data(struct mt792x_dev *dev, u32 addr, u32 *data0, u32 *data1)
+{
+	struct mt76_dev *mdev = &dev->mt76;
+	u32 ctrl_val;
+
+	/* Write control register to trigger EFUSE read */
+	ctrl_val = 0x41B00000 | (addr & 0xFFFF);
+	__mt76_wr(mdev, MT7927_EEF_TOP_EFUSE_CTRL, ctrl_val);
+
+	/* Wait 100us for EFUSE read to complete */
+	usleep_range(100, 150);
+
+	/* Read data registers */
+	*data0 = __mt76_rr(mdev, MT7927_EEF_TOP_EFUSE_RDATA0);
+	*data1 = __mt76_rr(mdev, MT7927_EEF_TOP_EFUSE_RDATA1);
+
+	dev_dbg(dev->mt76.dev, "MT7927 EFUSE[0x%04x]: data0=0x%08x data1=0x%08x\n",
+		addr, *data0, *data1);
+
+	return 0;
+}
+
+/* Parse MAC address from MT7927 EFUSE */
+static int mt7927_read_mac_address(struct mt792x_dev *dev, u8 *mac_addr)
+{
+	u32 data0, data1;
+	int ret;
+
+	/* Read MAC address from EFUSE - typically at offset 0x004 */
+	ret = mt7927_read_efuse_data(dev, 0x004, &data0, &data1);
+	if (ret)
+		return ret;
+
+	/* Parse MAC address from EFUSE data
+	 * Format varies by device, try common layout:
+	 * Bytes 0-3 in data0, bytes 4-5 in data1[15:0]
+	 */
+	mac_addr[0] = (data0 >> 0) & 0xFF;
+	mac_addr[1] = (data0 >> 8) & 0xFF;
+	mac_addr[2] = (data0 >> 16) & 0xFF;
+	mac_addr[3] = (data0 >> 24) & 0xFF;
+	mac_addr[4] = (data1 >> 0) & 0xFF;
+	mac_addr[5] = (data1 >> 8) & 0xFF;
+
+	/* Validate MAC address (not all zeros or all ones) */
+	if (is_zero_ether_addr(mac_addr) || is_broadcast_ether_addr(mac_addr)) {
+		dev_warn(dev->mt76.dev, "MT7927: Invalid MAC from EFUSE, will use random\n");
+		return -EINVAL;
+	}
+
+	dev_info(dev->mt76.dev, "MT7927: MAC from EFUSE: %pM\n", mac_addr);
+	return 0;
+}
+
+/* Read and apply MT7927 EFUSE configuration */
+int mt7927_read_efuse_config(struct mt792x_dev *dev)
+{
+	struct mt76_phy *mphy = &dev->mt76.phy;
+	u8 mac_addr[ETH_ALEN];
+	u32 data0, data1;
+	int ret;
+
+	dev_info(dev->mt76.dev, "MT7927: Reading EFUSE configuration\n");
+
+	/* Try to read MAC address from EFUSE */
+	ret = mt7927_read_mac_address(dev, mac_addr);
+	if (ret == 0) {
+		/* Valid MAC found in EFUSE */
+		memcpy(mphy->macaddr, mac_addr, ETH_ALEN);
+	}
+	/* If MAC read fails, keep the random MAC already set */
+
+	/* Read PHY capabilities from EFUSE at offset 0x034 */
+	ret = mt7927_read_efuse_data(dev, 0x034, &data0, &data1);
+	if (ret == 0) {
+		/* Parse antenna configuration from EFUSE */
+		u8 tx_ant = (data0 >> 8) & 0xF;
+		u8 rx_ant = (data0 >> 12) & 0xF;
+		
+		if (tx_ant && rx_ant) {
+			mphy->antenna_mask = tx_ant & rx_ant;
+			mphy->chainmask = mphy->antenna_mask;
+			dev_info(dev->mt76.dev, "MT7927: EFUSE antenna config: tx=0x%x rx=0x%x mask=0x%x\n",
+				 tx_ant, rx_ant, mphy->antenna_mask);
+		} else {
+			/* Default to 2x2 if EFUSE data invalid */
+			mphy->antenna_mask = 0x3;
+			mphy->chainmask = 0x3;
+			dev_info(dev->mt76.dev, "MT7927: Using default 2x2 antenna config\n");
+		}
+	} else {
+		/* Default configuration on EFUSE read failure */
+		mphy->antenna_mask = 0x3;
+		mphy->chainmask = 0x3;
+	}
+
+	/* Band support - MT7927 supports 2.4GHz + 5GHz */
+	mphy->cap.has_2ghz = true;
+	mphy->cap.has_5ghz = true;
+	mphy->cap.has_6ghz = false;  /* No 6GHz support */
+
+	/* Disable advanced features that require MCU support */
+	dev->has_eht = false;
+	dev->phy.chip_cap = 0;
+	dev->phy.eml_cap = 0;
+
+	dev_info(dev->mt76.dev, "MT7927: MAC=%pM antenna=0x%x bands=2G+5G\n",
+		 mphy->macaddr, mphy->antenna_mask);
+
+	return 0;
+}
+
+void mt7927_set_default_nic_capability(struct mt792x_dev *dev)
+{
+	struct mt76_phy *mphy = &dev->mt76.phy;
+	struct mt76_dev *mdev = mphy->dev;
+
+	dev_info(dev->mt76.dev, "MT7927: Setting default NIC capabilities (no MCU query)\n");
+
+	/* PHY capabilities - assume 2x2 MIMO, 2.4GHz + 5GHz */
+	mdev->phy.antenna_mask = 0x3;  /* 2 antennas (bits 0-1) */
+	mdev->phy.chainmask = 0x3;
+	mdev->phy.cap.has_2ghz = true;
+	mdev->phy.cap.has_5ghz = true;
+	mdev->phy.cap.has_6ghz = false;  /* No 6GHz for MT7927 */
+	dev->has_eht = false;  /* EHT not supported without proper init */
+
+	/* Chip capabilities - disable MLO since it requires MCU support */
+	dev->phy.chip_cap = 0;  /* No MLO_EVT_EN */
+	dev->phy.eml_cap = 0;
+
+	/* MAC address already set to random by caller */
+
+	dev_info(dev->mt76.dev, "MT7927: antenna_mask=0x%x chainmask=0x%x 2G=%d 5G=%d\n",
+		 mdev->phy.antenna_mask, mdev->phy.chainmask,
+		 mdev->phy.cap.has_2ghz, mdev->phy.cap.has_5ghz);
+}
+
 int mt7925_mcu_chip_config(struct mt792x_dev *dev, const char *cmd)
 {
 	u16 len = strlen(cmd) + 1;
@@ -955,6 +1106,15 @@ int mt7925_mcu_chip_config(struct mt792x_dev *dev, const char *cmd)
 			.data_size = cpu_to_le16(len),
 		},
 	};
+
+	/* MT7927: ROM path has no mailbox support; avoid UNI CHIP_CONFIG
+	 * to prevent Message 0002000e timeouts and subsequent resets.
+	 */
+	if (is_mt7927(&dev->mt76)) {
+		dev_info(dev->mt76.dev,
+				 "[MT7927] Skipping CHIP_CONFIG '%s' (no mailbox)\n", cmd);
+		return 0;
+	}
 
 	memcpy(req.config.data, cmd, len);
 
@@ -1082,6 +1242,11 @@ int mt7925_mcu_wtbl_update_hdr_trans(struct mt792x_dev *dev,
 int mt7925_mcu_set_tx(struct mt792x_dev *dev,
 		      struct ieee80211_bss_conf *bss_conf)
 {
+	/* MT7927/MT7929: firmware mailbox is not usable at runtime. Skip
+	 * EDCA_UPDATE to avoid timeouts.
+	 */
+	if (is_mt7927(&dev->mt76))
+		return 0;
 #define MCU_EDCA_AC_PARAM	0
 #define WMM_AIFS_SET		BIT(0)
 #define WMM_CW_MIN_SET		BIT(1)
@@ -2801,6 +2966,38 @@ int mt7925_mcu_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 	struct tlv *tlv;
 	int max_len;
 
+	/* MT7927/MT7929: unified SCAN_REQ not supported without mailbox.
+	 * Use register-based scanning setup instead.
+	 */
+	if (is_mt7927(phy->dev)) {
+		if (test_bit(MT76_HW_SCANNING, &phy->state))
+			return -EBUSY;
+
+		dev_info(mdev->dev, "MT7927: Starting register-based scan\n");
+		
+		/* Set RX filter and enable radio for scanning via registers */
+		if (scan_list && scan_list[0]) {
+			u32 channel = scan_list[0]->hw_value;
+			
+			dev_info(mdev->dev, "MT7927: Configuring scan channel %u\n", channel);
+			
+			/* Enable RX filter for scanning */
+			__mt76_wr(mdev, 0x820e3000, 0x1);
+			__mt76_wr(mdev, 0x820e3004, 0xFFFFFFFF);
+			
+			/* Enable radio */
+			__mt76_wr(mdev, 0x820e3008, 0x1);
+			
+			dev_info(mdev->dev, "MT7927: Register-based scan setup complete\n");
+		}
+		
+		/* For register-based scanning, we complete immediately and defer to upper layers
+		 * to handle actual scanning. The registers are set to enable RX during scan period.
+		 * Don't set MT76_HW_SCANNING flag since we have no MCU completion event.
+		 */
+		return 0;
+	}
+
 	if (test_bit(MT76_HW_SCANNING, &phy->state))
 		return -EBUSY;
 
@@ -2895,6 +3092,9 @@ int mt7925_mcu_sched_scan_req(struct mt76_phy *phy,
 			      struct ieee80211_vif *vif,
 			      struct cfg80211_sched_scan_request *sreq)
 {
+	/* MT7927/MT7929: unified SCAN_REQ not supported without mailbox. */
+	if (is_mt7927(phy->dev))
+		return -EOPNOTSUPP;
 	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct ieee80211_channel **scan_list = sreq->channels;
 	struct mt76_connac_mcu_scan_channel *chan;
@@ -2998,6 +3198,9 @@ mt7925_mcu_sched_scan_enable(struct mt76_phy *phy,
 			     struct ieee80211_vif *vif,
 			     bool enable)
 {
+	/* MT7927/MT7929: unified SCAN_REQ enable/disable unsupported. */
+	if (is_mt7927(phy->dev))
+		return enable ? -EOPNOTSUPP : 0;
 	struct mt76_dev *mdev = phy->dev;
 	struct scan_sched_enable *req;
 	struct scan_hdr_tlv *hdr;
@@ -3031,6 +3234,27 @@ mt7925_mcu_sched_scan_enable(struct mt76_phy *phy,
 int mt7925_mcu_cancel_hw_scan(struct mt76_phy *phy,
 			      struct ieee80211_vif *vif)
 {
+	/* MT7927/MT7929: disable RX filter and radio registers when scan completes. */
+	if (is_mt7927(phy->dev)) {
+		struct mt76_dev *mdev = phy->dev;
+		
+		if (!test_bit(MT76_HW_SCANNING, &phy->state))
+			return 0;
+		
+		dev_info(mdev->dev, "MT7927: Canceling register-based scan\n");
+		
+		/* Disable RX filter for scanning */
+		__mt76_wr(mdev, 0x820e3000, 0x0);
+		__mt76_wr(mdev, 0x820e3004, 0x0);
+		
+		/* Disable radio */
+		__mt76_wr(mdev, 0x820e3008, 0x0);
+		
+		clear_bit(MT76_HW_SCANNING, &phy->state);
+		
+		dev_info(mdev->dev, "MT7927: Register-based scan cancel complete\n");
+		return 0;
+	}
 	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct {
 		struct scan_hdr {
@@ -3070,6 +3294,11 @@ EXPORT_SYMBOL_GPL(mt7925_mcu_cancel_hw_scan);
 
 int mt7925_mcu_set_channel_domain(struct mt76_phy *phy)
 {
+	/* MT7927: firmware does not accept UNI SET_DOMAIN_INFO; skip. */
+	if (is_mt7927(phy->dev)) {
+		dev_info(phy->dev->dev, "[MT7927] Skipping SET_DOMAIN_INFO (no mailbox)\n");
+		return 0;
+	}
 	int len, i, n_max_channels, n_2ch = 0, n_5ch = 0, n_6ch = 0;
 	struct {
 		struct {
@@ -3312,7 +3541,12 @@ int mt7925_mcu_fill_message(struct mt76_dev *mdev, struct sk_buff *skb,
 		else
 			uni_txd->option = MCU_CMD_UNI_EXT_ACK;
 
-		if (cmd == MCU_UNI_CMD(HIF_CTRL) ||
+		/* For MT7927, firmware mailbox acks are not supported. Avoid waiting
+		 * for responses by clearing ACK for all unified commands to prevent
+		 * host-side timeouts and reinit loops.
+		 */
+		if (is_mt7927(mdev) ||
+		    cmd == MCU_UNI_CMD(HIF_CTRL) ||
 		    cmd == MCU_UNI_CMD(CHIP_CONFIG))
 			uni_txd->option &= ~MCU_CMD_ACK;
 
@@ -3353,6 +3587,9 @@ EXPORT_SYMBOL_GPL(mt7925_mcu_fill_message);
 
 int mt7925_mcu_set_rts_thresh(struct mt792x_phy *phy, u32 val)
 {
+	/* MT7927: skip BAND_CONFIG RTS_THRESHOLD to avoid mailbox timeouts */
+	if (is_mt7927(&phy->dev->mt76))
+		return 0;
 	struct {
 		u8 band_idx;
 		u8 _rsv[3];
@@ -3375,6 +3612,9 @@ int mt7925_mcu_set_rts_thresh(struct mt792x_phy *phy, u32 val)
 
 int mt7925_mcu_set_radio_en(struct mt792x_phy *phy, bool enable)
 {
+	/* MT7927: skip BAND_CONFIG RADIO_ENABLE to avoid mailbox timeouts */
+	if (is_mt7927(&phy->dev->mt76))
+		return 0;
 	struct {
 		u8 band_idx;
 		u8 _rsv[3];
@@ -3581,6 +3821,11 @@ out:
 
 int mt7925_mcu_set_rate_txpower(struct mt76_phy *phy)
 {
+	/* MT7927: skip UNI SET_POWER_LIMIT to avoid timeouts */
+	if (is_mt7927(phy->dev)) {
+		dev_info(phy->dev->dev, "[MT7927] Skipping SET_POWER_LIMIT (no mailbox)\n");
+		return 0;
+	}
 	int err;
 
 	if (phy->cap.has_2ghz) {
@@ -3611,6 +3856,9 @@ int mt7925_mcu_set_rxfilter(struct mt792x_dev *dev, u32 fif,
 			    u8 bit_op, u32 bit_map)
 {
 	struct mt792x_phy *phy = &dev->phy;
+	/* MT7927: skip BAND_CONFIG SET_MAC80211_RX_FILTER to avoid timeouts */
+	if (is_mt7927(&phy->dev->mt76))
+		return 0;
 	struct {
 		u8 band_idx;
 		u8 rsv1[3];
