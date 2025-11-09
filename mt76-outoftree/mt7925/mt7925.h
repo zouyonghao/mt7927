@@ -228,6 +228,9 @@ int mt7925_mcu_sta_update(struct mt792x_dev *dev,
 			  struct ieee80211_vif *vif, bool enable,
 			  enum mt76_sta_info_state state);
 int mt7925_mcu_set_chan_info(struct mt792x_phy *phy, u16 tag);
+int mt7925_mcu_set_chctx(struct mt76_phy *phy, struct mt76_vif_link *mvif,
+			 struct ieee80211_bss_conf *link_conf,
+			 struct ieee80211_chanctx_conf *ctx);
 int mt7925_mcu_set_tx(struct mt792x_dev *dev, struct ieee80211_bss_conf *bss_conf);
 int mt7925_mcu_set_eeprom(struct mt792x_dev *dev);
 int mt7925_mcu_get_rx_rate(struct mt792x_phy *phy, struct ieee80211_vif *vif,
@@ -258,6 +261,14 @@ bool mt7925_rx_check(struct mt76_dev *mdev, void *data, int len);
 void mt7925_queue_rx_skb(struct mt76_dev *mdev, enum mt76_rxq_id q,
 			 struct sk_buff *skb, u32 *info);
 void mt7925_stats_work(struct work_struct *work);
+/* Added minimal vif link ops for MT7927 generic scan/offchannel support */
+int mt7925_vif_link_add(struct mt76_phy *mphy, struct ieee80211_vif *vif,
+						struct ieee80211_bss_conf *link_conf,
+						struct mt76_vif_link *mlink);
+void mt7925_vif_link_remove(struct mt76_phy *mphy, struct ieee80211_vif *vif,
+							struct ieee80211_bss_conf *link_conf,
+							struct mt76_vif_link *mlink);
+int mt7925_set_channel(struct mt76_phy *mphy);
 void mt7925_set_stream_he_eht_caps(struct mt792x_phy *phy);
 int mt7925_init_mlo_caps(struct mt792x_phy *phy);
 int mt7925_init_debugfs(struct mt792x_dev *dev);
@@ -349,5 +360,8 @@ int mt7925_mcu_wtbl_update_hdr_trans(struct mt792x_dev *dev,
 int mt7927_read_efuse_config(struct mt792x_dev *dev);
 void mt7927_set_default_nic_capability(struct mt792x_dev *dev);
 void mt7927e_mcu_pre_init(struct mt792x_dev *dev);
+
+int wf_ioremap_read(phys_addr_t addr, u32 *val);
+int wf_ioremap_write(phys_addr_t addr, u32 val);
 
 #endif

@@ -271,17 +271,24 @@ struct mt76_vif_link *mt76_get_vif_phy_link(struct mt76_phy *phy,
 	struct mt76_dev *dev = phy->dev;
 	int i, ret;
 
+	/* Debug instrumentation: inspect existing links */
+	dev_info(dev->dev, "[MT7927-Dbg] mt76_get_vif_phy_link: phy=%p vif=%p link0_ctx=%p drv_vif_link_add=%p\n",
+		 phy, vif, mlink->ctx, dev->drv ? dev->drv->vif_link_add : NULL);
+
 	for (i = 0; i < ARRAY_SIZE(mvif->link); i++) {
 		mlink = mt76_dereference(mvif->link[i], dev);
 		if (!mlink)
 			continue;
+		dev_info(dev->dev, "[MT7927-Dbg]  link[%d]=%p ctx=%p phy_match=%d\n", i, mlink, mlink ? mlink->ctx : NULL, mlink && mt76_vif_link_phy(mlink) == phy);
 
 		if (mt76_vif_link_phy(mlink) == phy)
 			return mlink;
 	}
 
-	if (!dev->drv->vif_link_add)
+	if (!dev->drv->vif_link_add) {
+		dev_info(dev->dev, "[MT7927-Dbg]  vif_link_add missing; returning -EINVAL for scan/offchannel link creation\n");
 		return ERR_PTR(-EINVAL);
+	}
 
 	mlink = mt76_alloc_mlink(dev, mvif);
 	if (!mlink)

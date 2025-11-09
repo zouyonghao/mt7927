@@ -313,6 +313,9 @@ int __mt7925_start(struct mt792x_phy *phy)
 	struct mt792x_dev *dev = phy->dev;
 	int err;
 
+	if (is_mt7927(&dev->mt76))
+		dev_info(dev->mt76.dev, "[MT7927] __mt7925_start called\n");
+
 	err = mt7925_mcu_set_channel_domain(mphy);
 	if (err)
 		return err;
@@ -331,8 +334,14 @@ int __mt7925_start(struct mt792x_phy *phy)
 	mt792x_mac_reset_counters(phy);
 	set_bit(MT76_STATE_RUNNING, &mphy->state);
 
+	if (is_mt7927(&dev->mt76))
+		dev_info(dev->mt76.dev, "[MT7927] About to queue mac_work\n");
+
 	ieee80211_queue_delayed_work(mphy->hw, &mphy->mac_work,
 				     MT792x_WATCHDOG_TIME);
+
+	if (is_mt7927(&dev->mt76))
+		dev_info(dev->mt76.dev, "[MT7927] __mt7925_start complete\n");
 
 	return 0;
 }
@@ -429,11 +438,26 @@ mt7925_add_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 	mvif->deflink_id = IEEE80211_LINK_UNSPECIFIED;
 	mvif->mlo_pm_state = MT792x_MLO_LINK_DISASSOC;
 
+	/* Initialize mt76 per-vif link data so mt76_get_vif_phy_link() can find
+	 * mvif->link[0] immediately (needed by scan/ROC paths).
+	 */
+	mt76_vif_init(vif, &mvif->mt76);
+
 	ret = mt7925_mac_link_bss_add(dev, &vif->bss_conf, &mvif->sta.deflink);
 	if (ret < 0)
 		goto out;
 
+    /* Initialize link_conf[0] + sta.link[0] for non-MLO (single-link) mode.
+     * mac80211 expects vif->link_conf[0] and sta->link[0] populated.
+     */
+    rcu_assign_pointer(mvif->link_conf[0], &mvif->bss_conf);
+    rcu_assign_pointer(mvif->sta.link[0], &mvif->sta.deflink);
+
 	vif->driver_flags |= IEEE80211_VIF_BEACON_FILTER;
+
+	if (is_mt7927(&dev->mt76))
+		dev_info(dev->mt76.dev, "[MT7927] add_interface complete (idx=%d, wcid=%d)\n",
+				 mvif->bss_conf.mt76.idx, mvif->sta.deflink.wcid.idx);
 out:
 	mt792x_mutex_release(dev);
 
@@ -800,9 +824,12 @@ static void mt7925_configure_filter(struct ieee80211_hw *hw,
 	MT7925_FILTER(FIF_CONTROL, CONTROL);
 	MT7925_FILTER(FIF_OTHER_BSS, OTHER_BSS);
 
-	mt792x_mutex_acquire(dev);
-	mt7925_mcu_set_rxfilter(dev, flags, 0, 0);
-	mt792x_mutex_release(dev);
+	/* MT7927: Skip programming RX filter via MCU to avoid mailbox. */
+	if (!is_mt7927(&dev->mt76)) {
+		mt792x_mutex_acquire(dev);
+		mt7925_mcu_set_rxfilter(dev, flags, 0, 0);
+		mt792x_mutex_release(dev);
+	}
 
 	*total_flags &= (FIF_OTHER_BSS | FIF_FCSFAIL | FIF_CONTROL);
 }
@@ -1262,6 +1289,160 @@ void mt7925_mac_sta_remove(struct mt76_dev *mdev, struct ieee80211_vif *vif,
 }
 EXPORT_SYMBOL_GPL(mt7925_mac_sta_remove);
 
+/* Minimal vif_link_add/remove to satisfy mt76 offchannel and chanctx flows.
+ * For MT7927, we avoid MCU usage and reuse the default WCID for TX.
+ */
+int mt7925_vif_link_add(struct mt76_phy *mphy,
+							   struct ieee80211_vif *vif,
+							   struct ieee80211_bss_conf *link_conf,
+							   struct mt76_vif_link *mlink)
+{
+	struct mt792x_dev *dev = container_of(mphy->dev, struct mt792x_dev, mt76);
+	struct mt76_vif_data *mt76_mvif = mlink->mvif;
+	struct mt792x_vif *mvif = container_of(mt76_mvif, struct mt792x_vif, mt76);
+
+	/* Bind to default WCID; sufficient for sending probe requests during scan */
+	mlink->wcid = &mvif->sta.deflink.wcid;
+	mlink->band_idx = mphy->band_idx;
+	mlink->wmm_idx = 0;
+	/* Keep omac_idx/basic_rates_idx minimal; not used for probe requests */
+	mlink->omac_idx = 0;
+	
+	dev_info(dev->mt76.dev, "[MT7927-Dbg] vif_link_add: mlink=%p mvif=%p wcid=%p wcid.idx=%d offchannel=%d\n",
+		 mlink, mvif, mlink->wcid, mlink->wcid ? mlink->wcid->idx : -1, mlink->offchannel);
+	
+	/* Mark WCID as offchannel if this link is offchannel so TX selects it */
+	if (mlink->wcid)
+		mlink->wcid->offchannel = mlink->offchannel;
+
+	if (is_mt7927(&dev->mt76))
+		return 0;
+
+	/* For non-MT7927, keep it a no-op to avoid interfering with existing flow. */
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mt7925_vif_link_add);
+
+void mt7925_vif_link_remove(struct mt76_phy *mphy,
+								   struct ieee80211_vif *vif,
+								   struct ieee80211_bss_conf *link_conf,
+								   struct mt76_vif_link *mlink)
+{
+	/* Nothing to cleanup for our minimal offchannel link */
+}
+EXPORT_SYMBOL_GPL(mt7925_vif_link_remove);
+
+
+// int mt7925_mcu_set_chan_info(struct mt792x_phy *phy, u16 tag)
+// {
+// 	static const u8 ch_band[] = {
+// 		[NL80211_BAND_2GHZ] = 0,
+// 		[NL80211_BAND_5GHZ] = 1,
+// 		[NL80211_BAND_6GHZ] = 2,
+// 	};
+// 	struct mt792x_dev *dev = phy->dev;
+// 	struct cfg80211_chan_def *chandef = &phy->mt76->chandef;
+// 	int freq1 = chandef->center_freq1;
+// 	u8 band_idx = chandef->chan->band != NL80211_BAND_2GHZ;
+// 	struct {
+// 		/* fixed field */
+// 		u8 __rsv[4];
+
+// 		__le16 tag;
+// 		__le16 len;
+// 		u8 control_ch;
+// 		u8 center_ch;
+// 		u8 bw;
+// 		u8 tx_path_num;
+// 		u8 rx_path;	/* mask or num */
+// 		u8 switch_reason;
+// 		u8 band_idx;
+// 		u8 center_ch2;	/* for 80+80 only */
+// 		__le16 cac_case;
+// 		u8 channel_band;
+// 		u8 rsv0;
+// 		__le32 outband_freq;
+// 		u8 txpower_drop;
+// 		u8 ap_bw;
+// 		u8 ap_center_ch;
+// 		u8 rsv1[53];
+// 	} __packed req = {
+// 		.tag = cpu_to_le16(tag),
+// 		.len = cpu_to_le16(sizeof(req) - 4),
+// 		.control_ch = chandef->chan->hw_value,
+// 		.center_ch = ieee80211_frequency_to_channel(freq1),
+// 		.bw = mt76_connac_chan_bw(chandef),
+// 		.tx_path_num = hweight8(phy->mt76->antenna_mask),
+// 		.rx_path = phy->mt76->antenna_mask,
+// 		.band_idx = band_idx,
+// 		.channel_band = ch_band[chandef->chan->band],
+// 	};
+
+// 	if (chandef->chan->band == NL80211_BAND_6GHZ)
+// 		req.channel_band = 2;
+// 	else
+// 		req.channel_band = chandef->chan->band;
+
+// 	if (tag == UNI_CHANNEL_RX_PATH ||
+// 	    dev->mt76.hw->conf.flags & IEEE80211_CONF_MONITOR)
+// 		req.switch_reason = CH_SWITCH_NORMAL;
+// 	else if (phy->mt76->hw->conf.flags & IEEE80211_CONF_OFFCHANNEL)
+// 		req.switch_reason = CH_SWITCH_SCAN_BYPASS_DPD;
+// 	else if (!cfg80211_reg_can_beacon(phy->mt76->hw->wiphy, chandef,
+// 					  NL80211_IFTYPE_AP))
+// 		req.switch_reason = CH_SWITCH_DFS;
+// 	else
+// 		req.switch_reason = CH_SWITCH_NORMAL;
+
+// 	if (tag == UNI_CHANNEL_SWITCH)
+// 		req.rx_path = hweight8(req.rx_path);
+
+// 	if (chandef->width == NL80211_CHAN_WIDTH_80P80) {
+// 		int freq2 = chandef->center_freq2;
+
+// 		req.center_ch2 = ieee80211_frequency_to_channel(freq2);
+// 	}
+
+// 	return mt76_mcu_send_msg(&dev->mt76, MCU_UNI_CMD(CHANNEL_SWITCH),
+// 				 &req, sizeof(req), true);
+// }
+// EXPORT_SYMBOL_GPL(mt7925_mcu_set_chan_info);
+
+int mt7925_set_channel(struct mt76_phy *mphy)
+{
+	struct mt792x_phy *phy = mphy->priv;
+	struct mt792x_dev *dev = phy->dev;
+	int ret = 0;
+
+	/* MT7927 uses UNI_CMD_SCAN_REQ for scanning, which handles channel 
+	 * switching in firmware. The generic per-channel switching via
+	 * set_channel is not supported. Skip it to avoid timeouts.
+	 */
+	if (is_mt7927(&dev->mt76)) {
+		dev_info(dev->mt76.dev, "[MT7927] Skipping per-channel switch (ch=%d), firmware handles scanning\n",
+			 mphy->chandef.chan ? mphy->chandef.chan->hw_value : 0);
+		/* Still update timing and counters */
+		mt792x_mac_set_timeing(phy);
+		mt792x_mac_reset_counters(phy);
+		phy->noise = 0;
+		return 0;
+	}
+
+	/* Use standard MCU channel switch command for MT7925 */
+	ret = mt7925_mcu_set_chan_info(phy, MCU_EXT_CMD(CHANNEL_SWITCH));
+	if (ret) {
+		dev_err(dev->mt76.dev, "Channel switch failed: %d\n", ret);
+		return ret;
+	}
+		
+	mt792x_mac_set_timeing(phy);
+	mt792x_mac_reset_counters(phy);
+	phy->noise = 0;
+	
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt7925_set_channel);
+
 static int mt7925_set_rts_threshold(struct ieee80211_hw *hw, u32 val)
 {
 	struct mt792x_dev *dev = mt792x_hw_dev(hw);
@@ -1383,6 +1564,38 @@ void mt7925_scan_work(struct work_struct *work)
 	phy = (struct mt792x_phy *)container_of(work, struct mt792x_phy,
 						scan_work.work);
 
+	/* For MT7927, handle completion of firmware-driven scan.
+	 * Since firmware doesn't send completion events via registers,
+	 * we complete the scan after timeout. */
+	if (is_mt7927(&phy->dev->mt76)) {
+		dev_info(phy->dev->mt76.dev, "MT7927: Completing firmware scan (timeout-based)\n");
+		
+		/* Complete the scan state */
+		if (test_and_clear_bit(MT76_HW_SCANNING, &phy->mt76->state)) {
+			struct cfg80211_scan_info info = {
+				.aborted = false,
+			};
+			ieee80211_scan_completed(phy->mt76->hw, &info);
+			dev_info(phy->dev->mt76.dev, "MT7927: Scan completion reported to mac80211\n");
+		}
+		
+		/* Clean up any remaining scan events */
+		while (true) {
+			struct sk_buff *skb;
+			
+			spin_lock_bh(&phy->dev->mt76.lock);
+			skb = __skb_dequeue(&phy->scan_event_list);
+			spin_unlock_bh(&phy->dev->mt76.lock);
+
+			if (!skb)
+				break;
+
+			dev_kfree_skb(skb);
+		}
+		return;
+	}
+
+	/* For other devices, use the original logic */
 	while (true) {
 		struct mt76_dev *mdev = &phy->dev->mt76;
 		struct sk_buff *skb;
@@ -1447,6 +1660,11 @@ mt7925_hw_scan(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	struct mt76_phy *mphy = hw->priv;
 	int err;
 
+	if (is_mt7927(&dev->mt76))
+		dev_info(dev->mt76.dev,
+			 "MT7927: using register-based MCU scan path\n");
+
+	/* Firmware-driven scan flow */
 	mt792x_mutex_acquire(dev);
 	err = mt7925_mcu_hw_scan(mphy, vif, req);
 	mt792x_mutex_release(dev);
@@ -1905,6 +2123,10 @@ static void mt7925_vif_cfg_changed(struct ieee80211_hw *hw,
 	struct ieee80211_bss_conf *bss_conf;
 	int i;
 
+	/* MT7927: Skip MCU-dependent config changes for stability. */
+	if (is_mt7927(&dev->mt76))
+		return;
+
 	mt792x_mutex_acquire(dev);
 
 	if (changed & BSS_CHANGED_ASSOC) {
@@ -1954,6 +2176,10 @@ static void mt7925_link_info_changed(struct ieee80211_hw *hw,
 	struct mt792x_bss_conf *mconf;
 
 	mconf = mt792x_vif_to_link(mvif, info->link_id);
+
+	/* MT7927: Skip MCU-dependent link info updates for stability. */
+	if (is_mt7927(&dev->mt76))
+		return;
 
 	mt792x_mutex_acquire(dev);
 

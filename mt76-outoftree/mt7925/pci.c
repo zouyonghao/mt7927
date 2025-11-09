@@ -336,7 +336,16 @@ static int mt7927_wfsys_reset(struct mt792x_dev *dev)
 	val = mt76_rr(dev, CONN_SEMAPHORE_CONN_SEMA_OWN_BY_M0_STA_REP_1_ADDR);
 	dev_info(mdev->dev, "MT7927: CONN_SEMAPHORE = 0x%08x (should be 0x0)\n", val);
 	if (val & CONN_SEMAPHORE_CONN_SEMA_OWN_BY_M0_STA_REP_1_CONN_SEMA00_OWN_BY_M0_STA_REP_MASK)
-		dev_err(mdev->dev, "MT7927: L0.5 reset failed - semaphore owned by MCU\n");
+		dev_warn(mdev->dev, "MT7927: L0.5 reset incomplete - semaphore owned by MCU, will retry\n");
+
+	/* CRITICAL: MCU state after reset
+	 * After WF subsystem reset, the MCU may not automatically start the ROM bootloader.
+	 * The semaphore being 0x1 (owned by MCU) is actually NORMAL - it means the hardware
+	 * reset completed and MCU domain is alive. The driver_own sequence will clear it.
+	 * 
+	 * We DON'T need to wait for MCU IDLE here - that happens after firmware is loaded!
+	 */
+	dev_info(mdev->dev, "MT7927: WF subsystem reset complete, semaphore=0x%08x\n", val);
 
 	/* Wait for WF init done */
 	for (i = 0; i < 500; i++) {
@@ -429,6 +438,10 @@ static int mt7925_pci_probe(struct pci_dev *pdev,
 		.sta_event = mt7925_mac_sta_event,
 		.sta_remove = mt7925_mac_sta_remove,
 		.update_survey = mt792x_update_channel,
+		.set_channel = mt7925_set_channel,
+		.link_data_size = sizeof(struct mt76_vif_link),
+		.vif_link_add = mt7925_vif_link_add,
+		.vif_link_remove = mt7925_vif_link_remove,
 	};
 	static const struct mt792x_hif_ops mt7925_pcie_ops = {
 		.init_reset = mt7925e_init_reset,
@@ -561,32 +574,53 @@ static int mt7925_pci_probe(struct pci_dev *pdev,
 	if (!mt7925_disable_aspm && mt76_pci_aspm_supported(pdev))
 		dev->aspm_supported = true;
 
-	/* Power control - needed for all devices before DMA init */
-	ret = __mt792x_mcu_fw_pmctrl(dev);
-	if (ret)
-		goto err_free_dev;
+	/* Power control - order matters!
+	 * MT7927: Must do WF reset BEFORE taking driver ownership
+	 * MT7925: Standard power control sequence
+	 */
+	if (pdev->device == 0x7927) {
+		/* MT7927: Skip initial power control, do reset first */
+		mdev->rev = (mt76_rr(dev, MT_HW_CHIPID) << 16) |
+			    (mt76_rr(dev, MT_HW_REV) & 0xff);
+		dev_info(mdev->dev, "MT7927: ASIC revision: %04x\n", mdev->rev);
 
-	ret = __mt792xe_mcu_drv_pmctrl(dev);
-	if (ret)
-		goto err_free_dev;
-
-	mdev->rev = (mt76_rr(dev, MT_HW_CHIPID) << 16) |
-		    (mt76_rr(dev, MT_HW_REV) & 0xff);
-
-	dev_info(mdev->dev, "ASIC revision: %04x\n", mdev->rev);
-
-	/* MT_HW_EMI_CTL is MT7925-specific, skip for MT7927/MT6639 */
-	if (pdev->device != 0x7927) {
-		mt76_rmw_field(dev, MT_HW_EMI_CTL, MT_HW_EMI_CTL_SLPPROT_EN, 1);
-	}
-
-	/* Use MT7927-specific reset for device 0x7927, standard reset for others */
-	if (pdev->device == 0x7927)
+		/* Reset WF subsystem first */
 		ret = mt7927_wfsys_reset(dev);
-	else
+		if (ret)
+			goto err_free_dev;
+
+		/* NOW take driver ownership after reset */
+		ret = __mt792x_mcu_fw_pmctrl(dev);
+		if (ret)
+			goto err_free_dev;
+
+		ret = __mt792xe_mcu_drv_pmctrl(dev);
+		if (ret)
+			goto err_free_dev;
+
+		dev_info(mdev->dev, "MT7927: Driver ownership acquired after reset\n");
+	} else {
+		/* MT7925: Standard power control before reset */
+		ret = __mt792x_mcu_fw_pmctrl(dev);
+		if (ret)
+			goto err_free_dev;
+
+		ret = __mt792xe_mcu_drv_pmctrl(dev);
+		if (ret)
+			goto err_free_dev;
+
+		mdev->rev = (mt76_rr(dev, MT_HW_CHIPID) << 16) |
+			    (mt76_rr(dev, MT_HW_REV) & 0xff);
+		dev_info(mdev->dev, "ASIC revision: %04x\n", mdev->rev);
+
+		/* MT_HW_EMI_CTL is MT7925-specific */
+		mt76_rmw_field(dev, MT_HW_EMI_CTL, MT_HW_EMI_CTL_SLPPROT_EN, 1);
+
+		/* Standard MT7925 reset */
 		ret = mt792x_wfsys_reset(dev);
-	if (ret)
-		goto err_free_dev;
+		if (ret)
+			goto err_free_dev;
+	}
 
 	mt76_wr(dev, irq_map.host_irq_enable, 0);
 

@@ -3,6 +3,7 @@
  * Copyright (C) 2024 Felix Fietkau <nbd@nbd.name>
  */
 #include "mt76.h"
+#include "mt76_connac.h"
 
 static void mt76_scan_complete(struct mt76_dev *dev, bool abort)
 {
@@ -40,8 +41,22 @@ mt76_scan_send_probe(struct mt76_dev *dev, struct cfg80211_ssid *ssid)
 	struct ieee80211_tx_info *info;
 	struct sk_buff *skb;
 
+	dev_info(dev->dev, "[MT7927-Dbg] scan_send_probe: mvif=%p wcid=%p\n",
+		 mvif, mvif ? mvif->wcid : NULL);
+	
+	if (!mvif || !mvif->wcid) {
+		dev_err(dev->dev, "[MT7927-Dbg] scan_send_probe: NULL mvif or wcid!\n");
+		return;
+	}
+
+	dev_info(dev->dev, "[MT7927-Dbg] scan_send_probe: vif=%p phy=%p phy->hw=%p\n",
+		 vif, phy, phy->hw);
+	dev_info(dev->dev, "[MT7927-Dbg] scan_send_probe: vif->addr=%pM ssid_len=%d\n",
+		 vif->addr, ssid->ssid_len);
+
 	skb = ieee80211_probereq_get(phy->hw, vif->addr, ssid->ssid,
 				     ssid->ssid_len, req->ie_len);
+	dev_info(dev->dev, "[MT7927-Dbg] scan_send_probe: probereq_get returned skb=%p\n", skb);
 	if (!skb)
 		return;
 
@@ -70,11 +85,20 @@ mt76_scan_send_probe(struct mt76_dev *dev, struct cfg80211_ssid *ssid)
 		info->flags |= IEEE80211_TX_CTL_NO_CCK_RATE;
 	info->control.flags |= IEEE80211_TX_CTRL_DONT_USE_RATE_MASK;
 
+	dev_info(dev->dev, "[MT7927-Dbg] scan_send_probe: calling mt76_tx wcid=%p idx=%d offchannel=%d\n",
+		 mvif->wcid, mvif->wcid->idx, mvif->wcid->offchannel);
+	dev_info(dev->dev, "[MT7927-Dbg] scan_send_probe: tx_offchannel=%p tx_pending=%p\n",
+		 &mvif->wcid->tx_offchannel, &mvif->wcid->tx_pending);
+
 	mt76_tx(phy, NULL, mvif->wcid, skb);
+
+	dev_info(dev->dev, "[MT7927-Dbg] scan_send_probe: mt76_tx returned\n");
 
 out:
 	rcu_read_unlock();
 }
+
+
 
 void mt76_scan_work(struct work_struct *work)
 {
@@ -85,6 +109,13 @@ void mt76_scan_work(struct work_struct *work)
 	struct mt76_phy *phy = dev->scan.phy;
 	int duration = HZ / 9; /* ~110 ms */
 	int i;
+
+	dev_info(dev->dev, "[MT7927-Dbg] scan_work: enter chan_idx=%d/%d mlink=%p\n",
+		 dev->scan.chan_idx, req ? req->n_channels : 0, dev->scan.mlink);
+
+	/* Always allow the generic scan worker to run. For MT7927 we now
+	 * intentionally rely on this path since the MCU mailbox is not used.
+	 */
 
 	if (dev->scan.chan_idx >= req->n_channels) {
 		mt76_scan_complete(dev, false);
@@ -106,9 +137,25 @@ void mt76_scan_work(struct work_struct *work)
 		goto out;
 
 	duration = HZ / 16; /* ~60 ms */
+	
+	dev_info(dev->dev, "[MT7927-Dbg] scan_work: sending probes n_ssids=%d mlink=%p\n",
+		 req->n_ssids, dev->scan.mlink);
+	
+	if (dev->scan.mlink) {
+		struct mt76_vif_link *mlink = dev->scan.mlink;
+		dev_info(dev->dev, "[MT7927-Dbg] scan_work: mlink valid, wcid=%p\n", mlink->wcid);
+		if (mlink->wcid) {
+			dev_info(dev->dev, "[MT7927-Dbg] scan_work: wcid valid, idx=%d offchannel=%d\n",
+				 mlink->wcid->idx, mlink->wcid->offchannel);
+		}
+	}
+	
 	local_bh_disable();
-	for (i = 0; i < req->n_ssids; i++)
+	for (i = 0; i < req->n_ssids; i++) {
+		dev_info(dev->dev, "[MT7927-Dbg] scan_work: calling send_probe %d/%d\n", i+1, req->n_ssids);
 		mt76_scan_send_probe(dev, &req->ssids[i]);
+		dev_info(dev->dev, "[MT7927-Dbg] scan_work: send_probe %d done\n", i+1);
+	}
 	local_bh_enable();
 
 out:
@@ -138,15 +185,20 @@ int mt76_hw_scan(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	}
 
 	mutex_lock(&dev->mutex);
+	dev_info(dev->dev, "[MT7927-Dbg] mt76_hw_scan: enter phy=%p vif=%p scan.req=%p roc_vif=%p drv_vif_link_add=%p\n",
+			 phy, vif, dev->scan.req, phy->roc_vif, dev->drv ? dev->drv->vif_link_add : NULL);
 
 	if (dev->scan.req || phy->roc_vif) {
 		ret = -EBUSY;
+		dev_info(dev->dev, "[MT7927-Dbg] mt76_hw_scan: busy (scan.req=%p roc_vif=%p)\n",
+				 dev->scan.req, phy->roc_vif);
 		goto out;
 	}
 
 	mlink = mt76_get_vif_phy_link(phy, vif);
 	if (IS_ERR(mlink)) {
 		ret = PTR_ERR(mlink);
+		dev_info(dev->dev, "[MT7927-Dbg] mt76_hw_scan: mt76_get_vif_phy_link failed ret=%d\n", ret);
 		goto out;
 	}
 
@@ -155,9 +207,12 @@ int mt76_hw_scan(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	dev->scan.vif = vif;
 	dev->scan.phy = phy;
 	dev->scan.mlink = mlink;
+	dev_info(dev->dev, "[MT7927-Dbg] mt76_hw_scan: queued scan_work (n_chans=%d n_ssids=%d)\n",
+			 req->req.n_channels, req->req.n_ssids);
 	ieee80211_queue_delayed_work(dev->phy.hw, &dev->scan_work, 0);
 
-out:
+ out:
+	 dev_info(dev->dev, "[MT7927-Dbg] mt76_hw_scan: exit ret=%d\n", ret);
 	mutex_unlock(&dev->mutex);
 
 	return ret;

@@ -7,6 +7,7 @@
 #include "mt792x.h"
 #include "dma.h"
 #include "trace.h"
+#include "mt7925/mt7927_regs.h"
 
 irqreturn_t mt792x_irq_handler(int irq, void *dev_instance)
 {
@@ -123,8 +124,11 @@ static void mt792x_dma_prefetch(struct mt792x_dev *dev)
 	}
 }
 
+
 int mt792x_dma_enable(struct mt792x_dev *dev)
 {
+	bool tx_only = is_mt7927(&dev->mt76);
+
 	/* configure perfetch settings */
 	mt792x_dma_prefetch(dev);
 
@@ -147,8 +151,18 @@ int mt792x_dma_enable(struct mt792x_dev *dev)
 		 MT_WFDMA0_GLO_CFG_CSR_DISP_BASE_PTR_CHAIN_EN |
 		 MT_WFDMA0_GLO_CFG_OMIT_RX_INFO_PFET2);
 
-	mt76_set(dev, MT_WFDMA0_GLO_CFG,
-		 MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN);
+	/*
+	 * MT7927 ROM crashes when RX DMA is enabled too early, but we still
+	 * need the TX engine alive so the INIT/FWDL rings make forward progress.
+	 */
+	if (tx_only) {
+		mt76_set(dev, MT_WFDMA0_GLO_CFG, MT_WFDMA0_GLO_CFG_TX_DMA_EN);
+		dev_info(dev->mt76.dev,
+			 "[MT7927] TX DMA enabled (RX still gated) for ROM init\n");
+	} else {
+		mt76_set(dev, MT_WFDMA0_GLO_CFG,
+			 MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN);
+	}
 
 	if (is_mt7925(&dev->mt76) || is_mt7927(&dev->mt76)) {
 		mt76_rmw(dev, MT_UWFDMA0_GLO_CFG_EXT1, BIT(28), BIT(28));
@@ -369,4 +383,74 @@ int mt792x_wfsys_reset(struct mt792x_dev *dev)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(mt792x_wfsys_reset);
+
+/* MT7927: Enable WFDMA TX/RX DMA engines after firmware is loaded
+ * This must be called AFTER firmware is running, not during ROM bootloader phase.
+ * ROM bootloader crashes if DMA engines are enabled too early.
+ */
+int mt7927_dma_enable_engines(struct mt792x_dev *dev)
+{
+	u32 glo_cfg, int_ena, host_int_mask;
+	const u32 rx_ext_mask = BIT(12) | BIT(13) | BIT(14) | BIT(15);
+	
+	if (!is_mt7927(&dev->mt76))
+		return 0;  /* Only for MT7927 */
+	
+	dev_info(dev->mt76.dev, "[MT7927] Enabling WFDMA TX/RX DMA engines (post-firmware)\n");
+	
+	/* Now it's safe to enable TX/RX DMA engines */
+	mt76_set(dev, MT_WFDMA0_GLO_CFG,
+		 MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN);
+	
+	/* Mirror MTK register flow to configure host-side WFDMA */
+	mt76_rmw(dev, MT_UWFDMA0_GLO_CFG_EXT1, BIT(28), BIT(28));
+	mt76_set(dev, MT_WFDMA0_INT_RX_PRI, 0x0F00);
+	mt76_set(dev, MT_WFDMA0_INT_TX_PRI, 0x7F00);
+	mt76_wr(dev, WF_WFDMA_HOST_DMA0_WPDMA_GLO_CFG_EXT1_ADDR,
+		MT7927_WPDMA_GLO_CFG_EXT1_VALUE |
+		MT7927_WPDMA_GLO_CFG_EXT1_TX_FCTRL);
+	mt76_wr(dev, WF_WFDMA_HOST_DMA0_WPDMA_GLO_CFG_EXT2_ADDR,
+		MT7927_WPDMA_GLO_CFG_EXT2_VALUE);
+	mt76_wr(dev, WF_WFDMA_EXT_WRAP_CSR_WFDMA_HIF_PERF_MAVG_DIV_ADDR,
+		MT7927_WFDMA_HIF_PERF_MAVG_DIV_VALUE);
+	mt76_wr(dev, WF_WFDMA_HOST_DMA0_HOST_PER_DLY_INT_CFG_ADDR,
+		MT7927_PER_DLY_INT_CFG_VALUE);
+	mt76_wr(dev, WF_WFDMA_EXT_WRAP_CSR_WFDMA_DLY_IDX_CFG_0_ADDR,
+		MT7927_DLY_IDX_CFG_RING4_7_VALUE);
+	mt76_set(dev, MT_WFDMA_DUMMY_CR, MT_WFDMA_NEED_REINIT);
+
+	/* Compose interrupt mask combining legacy rings with MT6639-style rings */
+	host_int_mask = dev->irq_map->tx.all_complete_mask |
+		       dev->irq_map->rx.data_complete_mask |
+		       dev->irq_map->rx.wm2_complete_mask |
+		       dev->irq_map->rx.wm_complete_mask |
+		       MT_INT_MCU_CMD;
+	host_int_mask |= rx_ext_mask;
+
+	/* Program host interrupt mask using SET/CLR helpers */
+	mt76_wr(dev, MT_WFDMA0_HOST_INT_STA, 0xffffffff);
+	mt76_wr(dev, WF_WFDMA_HOST_DMA0_HOST_INT_ENA_CLR_ADDR, 0xffffffff);
+	mt76_wr(dev, WF_WFDMA_HOST_DMA0_HOST_INT_ENA_SET_ADDR, host_int_mask);
+	mt76_set_irq_mask(&dev->mt76, 0, ~0u, 0);
+	mt76_set_irq_mask(&dev->mt76, 0, 0, host_int_mask);
+	mt76_set(dev, MT_MCU2HOST_SW_INT_ENA, MT_MCU_CMD_WAKE_RX_PCIE);
+
+	/* Verify DMA enable and interrupt state */
+	glo_cfg = mt76_rr(dev, MT_WFDMA0_GLO_CFG);
+	int_ena = mt76_rr(dev, dev->irq_map->host_irq_enable);
+	dev_info(dev->mt76.dev,
+		 "[MT7927] WFDMA GLO_CFG=0x%08x HOST_INT_ENA=0x%08x (mask=0x%08x)\n",
+		 glo_cfg, int_ena, host_int_mask);
+
+	if (!(glo_cfg & MT_WFDMA0_GLO_CFG_TX_DMA_EN) ||
+	    !(glo_cfg & MT_WFDMA0_GLO_CFG_RX_DMA_EN)) {
+		dev_err(dev->mt76.dev, "[MT7927] ERROR: DMA engines failed to enable!\n");
+		return -EIO;
+	}
+
+	dev_info(dev->mt76.dev, "[MT7927] WFDMA TX/RX DMA engines enabled successfully\n");
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mt7927_dma_enable_engines);
+
 

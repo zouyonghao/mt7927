@@ -149,6 +149,10 @@ int mt7925_mcu_update_arp_filter(struct mt76_dev *dev,
 		},
 	};
 
+	/* MT7927/MT7929: Skip ARP filter (no mailbox). */
+	if (is_mt7927(dev))
+		return 0;
+
 	skb = mt76_mcu_msg_alloc(dev, NULL, sizeof(req) + len * 2 * sizeof(__be32));
 	if (!skb)
 		return -ENOMEM;
@@ -530,6 +534,11 @@ mt7925_mcu_uni_rx_unsolicited_event(struct mt792x_dev *dev,
 
 	rxd = (struct mt7925_mcu_rxd *)skb->data;
 
+	/* Debug output for MT7927 */
+	if (is_mt7927(&dev->mt76)) {
+		dev_info(dev->mt76.dev, "MT7927: Received unsolicited event EID=0x%x\n", rxd->eid);
+	}
+
 	switch (rxd->eid) {
 	case MCU_UNI_EVENT_HIF_CTRL:
 		mt7925_mcu_uni_hif_ctrl_event(dev, skb);
@@ -541,6 +550,7 @@ mt7925_mcu_uni_rx_unsolicited_event(struct mt792x_dev *dev,
 		mt7925_mcu_uni_roc_event(dev, skb);
 		break;
 	case MCU_UNI_EVENT_SCAN_DONE:
+		dev_info(dev->mt76.dev, "MT7927: Received SCAN_DONE event\n");
 		mt7925_mcu_scan_event(dev, skb);
 		return;
 	case MCU_UNI_EVENT_TX_DONE:
@@ -554,6 +564,9 @@ mt7925_mcu_uni_rx_unsolicited_event(struct mt792x_dev *dev,
 		mt76_connac_mcu_coredump_event(&dev->mt76, skb, &dev->coredump);
 		return;
 	default:
+		if (is_mt7927(&dev->mt76)) {
+			dev_info(dev->mt76.dev, "MT7927: Unknown event EID=0x%x\n", rxd->eid);
+		}
 		break;
 	}
 	dev_kfree_skb(skb);
@@ -1124,6 +1137,9 @@ int mt7925_mcu_chip_config(struct mt792x_dev *dev, const char *cmd)
 
 int mt7925_mcu_set_deep_sleep(struct mt792x_dev *dev, bool enable)
 {
+	/* MT7927: Skip CHIP_CONFIG deep sleep control (no mailbox) */
+	if (is_mt7927(&dev->mt76))
+		return 0;
 	char cmd[16];
 
 	snprintf(cmd, sizeof(cmd), "KeepFullPwr %d", !enable);
@@ -1639,6 +1655,10 @@ int mt7925_mcu_uni_bss_ps(struct mt792x_dev *dev,
 		},
 	};
 
+	/* MT7927/MT7929: Skip BSS PS (no mailbox). */
+	if (is_mt7927(&dev->mt76))
+		return 0;
+
 	if (link_conf->vif->type != NL80211_IFTYPE_STATION)
 		return -EOPNOTSUPP;
 
@@ -2137,6 +2157,10 @@ int mt7925_mcu_sta_update(struct mt792x_dev *dev,
 	struct mt792x_sta *msta;
 	struct mt792x_link_sta *mlink;
 
+	/* MT7927/MT7929: Skip STA update (no mailbox). */
+	if (is_mt7927(&dev->mt76))
+		return 0;
+
 	if (link_sta) {
 		msta = (struct mt792x_sta *)link_sta->sta->drv_priv;
 		mlink = mt792x_sta_to_link(msta, link_sta->link_id);
@@ -2158,6 +2182,10 @@ int mt7925_mcu_set_beacon_filter(struct mt792x_dev *dev,
 #define MT7925_FIF_BIT_CLR		BIT(1)
 #define MT7925_FIF_BIT_SET		BIT(0)
 	int err = 0;
+
+	/* MT7927/MT7929: Skip beacon filter (no mailbox). */
+	if (is_mt7927(&dev->mt76))
+		return 0;
 
 	if (enable) {
 		err = mt7925_mcu_uni_bss_bcnft(dev, &vif->bss_conf, true);
@@ -2350,6 +2378,12 @@ mt7925_mcu_uni_add_beacon_offload(struct mt792x_dev *dev,
 	};
 	struct sk_buff *skb;
 	u8 cap_offs;
+
+	/* MT7927/MT7929: firmware mailbox is not usable at runtime. Skip
+	 * BSS_INFO_UPDATE (beacon) to avoid timeouts.
+	 */
+	if (is_mt7927(&dev->mt76))
+		return 0;
 
 	/* support enable/update process only
 	 * disable flow would be handled in bss stop handler automatically
@@ -2809,6 +2843,12 @@ int mt7925_mcu_set_timing(struct mt792x_phy *phy,
 	struct mt792x_dev *dev = phy->dev;
 	struct sk_buff *skb;
 
+	/* MT7927/MT7929: firmware mailbox is not usable at runtime. Skip
+	 * BSS_INFO_UPDATE (timing) to avoid timeouts.
+	 */
+	if (is_mt7927(&dev->mt76))
+		return 0;
+
 	skb = __mt7925_mcu_alloc_bss_req(&dev->mt76, &mconf->mt76,
 					 MT7925_BSS_UPDATE_MAX_SIZE);
 	if (IS_ERR(skb))
@@ -2966,35 +3006,131 @@ int mt7925_mcu_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 	struct tlv *tlv;
 	int max_len;
 
-	/* MT7927/MT7929: unified SCAN_REQ not supported without mailbox.
-	 * Use register-based scanning setup instead.
-	 */
+	/* MT7927: Send UNI_CMD_SCAN_REQ directly via register-based transport. */
 	if (is_mt7927(phy->dev)) {
+		struct mt792x_phy *phy_priv = phy->priv;
+		unsigned long timeout_ms;
+		u8 chan_count;
+
 		if (test_bit(MT76_HW_SCANNING, &phy->state))
 			return -EBUSY;
 
-		dev_info(mdev->dev, "MT7927: Starting register-based scan\n");
-		
-		/* Set RX filter and enable radio for scanning via registers */
-		if (scan_list && scan_list[0]) {
-			u32 channel = scan_list[0]->hw_value;
-			
-			dev_info(mdev->dev, "MT7927: Configuring scan channel %u\n", channel);
-			
-			/* Enable RX filter for scanning */
-			__mt76_wr(mdev, 0x820e3000, 0x1);
-			__mt76_wr(mdev, 0x820e3004, 0xFFFFFFFF);
-			
-			/* Enable radio */
-			__mt76_wr(mdev, 0x820e3008, 0x1);
-			
-			dev_info(mdev->dev, "MT7927: Register-based scan setup complete\n");
+		if (!phy_priv) {
+			dev_err(mdev->dev, "MT7927: missing phy context for scan\n");
+			return -EINVAL;
 		}
-		
-		/* For register-based scanning, we complete immediately and defer to upper layers
-		 * to handle actual scanning. The registers are set to enable RX during scan period.
-		 * Don't set MT76_HW_SCANNING flag since we have no MCU completion event.
-		 */
+
+		cancel_delayed_work_sync(&phy_priv->scan_work);
+
+		dev_info(mdev->dev,
+			 "MT7927: preparing UNI_CMD_SCAN_REQ for %d channels\n",
+			 sreq->n_channels);
+
+		set_bit(MT76_HW_SCANNING, &phy->state);
+		mvif->scan_seq_num = (mvif->scan_seq_num + 1) & 0x7f;
+
+		max_len = sizeof(*hdr) + sizeof(*req) + sizeof(*ssid) +
+			  sizeof(*bssid) + sizeof(*chan_info) +
+			  sizeof(*misc) + sizeof(*ie);
+
+		skb = mt76_mcu_msg_alloc(mdev, NULL, max_len);
+		if (!skb) {
+			clear_bit(MT76_HW_SCANNING, &phy->state);
+			return -ENOMEM;
+		}
+
+		hdr = (struct scan_hdr_tlv *)skb_put_zero(skb, sizeof(*hdr));
+		hdr->seq_num = mvif->scan_seq_num | mvif->band_idx << 7;
+		hdr->bss_idx = mvif->idx;
+
+		tlv = mt76_connac_mcu_add_tlv(skb, UNI_SCAN_REQ, sizeof(*req));
+		req = (struct scan_req_tlv *)tlv;
+		req->scan_type = sreq->n_ssids ? 1 : 0;
+		req->probe_req_num = sreq->n_ssids ? 2 : 0;
+		req->channel_min_dwell_time = cpu_to_le16(10);
+		req->channel_dwell_time = cpu_to_le16(sreq->n_ssids ? 40 : 100);
+		req->timeout_value = cpu_to_le16(0);
+		req->probe_delay_time = cpu_to_le16(0);
+		req->func_mask_ext = cpu_to_le32(0);
+		req->src_mask = SCAN_SRC_NORMAL;
+		req->scan_func |= SCAN_FUNC_SPLIT_SCAN | SCAN_FUNC_DBDC_SCAN_DIS;
+
+		tlv = mt76_connac_mcu_add_tlv(skb, UNI_SCAN_SSID, sizeof(*ssid));
+		ssid = (struct scan_ssid_tlv *)tlv;
+		for (i = 0; i < sreq->n_ssids && i < ARRAY_SIZE(ssid->ssids); i++) {
+			if (!sreq->ssids[i].ssid_len)
+				continue;
+			ssid->ssids[n_ssids].ssid_len =
+				cpu_to_le32(sreq->ssids[i].ssid_len);
+			memcpy(ssid->ssids[n_ssids].ssid, sreq->ssids[i].ssid,
+			       sreq->ssids[i].ssid_len);
+			n_ssids++;
+		}
+		ssid->ssid_type = n_ssids ? BIT(2) : BIT(0);
+		ssid->ssids_num = n_ssids;
+
+		tlv = mt76_connac_mcu_add_tlv(skb, UNI_SCAN_BSSID, sizeof(*bssid));
+		bssid = (struct scan_bssid_tlv *)tlv;
+		memcpy(bssid->bssid, sreq->bssid, ETH_ALEN);
+
+		tlv = mt76_connac_mcu_add_tlv(skb, UNI_SCAN_CHANNEL,
+					     sizeof(*chan_info));
+		chan_info = (struct scan_chan_info_tlv *)tlv;
+		chan_info->channels_num = min_t(u8, sreq->n_channels,
+					ARRAY_SIZE(chan_info->channels));
+		for (i = 0; i < chan_info->channels_num; i++) {
+			chan = &chan_info->channels[i];
+			switch (scan_list[i]->band) {
+			case NL80211_BAND_2GHZ:
+				chan->band = 1;
+				break;
+			case NL80211_BAND_6GHZ:
+				chan->band = 3;
+				break;
+			default:
+				chan->band = 2;
+				break;
+			}
+			chan->channel_num = scan_list[i]->hw_value;
+		}
+		chan_info->channel_type = sreq->n_channels ? 4 : 0;
+
+		tlv = mt76_connac_mcu_add_tlv(skb, UNI_SCAN_IE, sizeof(*ie));
+		ie = (struct scan_ie_tlv *)tlv;
+		if (sreq->ie_len > 0) {
+			memcpy(ie->ies, sreq->ie, sreq->ie_len);
+			ie->ies_len = cpu_to_le16(sreq->ie_len);
+		}
+
+		tlv = mt76_connac_mcu_add_tlv(skb, UNI_SCAN_MISC, sizeof(*misc));
+		misc = (struct scan_misc_tlv *)tlv;
+		if (sreq->flags & NL80211_SCAN_FLAG_RANDOM_ADDR) {
+			get_random_mask_addr(misc->random_mac, sreq->mac_addr,
+					     sreq->mac_addr_mask);
+			req->scan_func |= SCAN_FUNC_RANDOM_MAC | SCAN_FUNC_RANDOM_SN;
+		}
+
+		err = mt76_mcu_skb_send_msg(mdev, skb, MCU_UNI_CMD(SCAN_REQ), false);
+		if (err < 0) {
+			dev_err(mdev->dev, "MT7927: SCAN_REQ send failed: %d\n", err);
+			clear_bit(MT76_HW_SCANNING, &phy->state);
+			return err;
+		}
+
+		chan_count = chan_info->channels_num;
+		if (!chan_count)
+			chan_count = 1;
+
+		timeout_ms = chan_count * (n_ssids ? 100 : 50) + 400;
+		if (timeout_ms < 200)
+			timeout_ms = 200;
+
+		dev_info(mdev->dev,
+			 "MT7927: SCAN_REQ queued (seq=%d) fallback completion %lu ms\n",
+			 hdr->seq_num, timeout_ms);
+		ieee80211_queue_delayed_work(phy->hw, &phy_priv->scan_work,
+				     msecs_to_jiffies(timeout_ms));
+
 		return 0;
 	}
 
@@ -3020,6 +3156,8 @@ int mt7925_mcu_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 	req = (struct scan_req_tlv *)tlv;
 	req->scan_type = sreq->n_ssids ? 1 : 0;
 	req->probe_req_num = sreq->n_ssids ? 2 : 0;
+	req->func_mask_ext = cpu_to_le32(0);
+	req->src_mask = SCAN_SRC_NORMAL;
 
 	tlv = mt76_connac_mcu_add_tlv(skb, UNI_SCAN_SSID, sizeof(*ssid));
 	ssid = (struct scan_ssid_tlv *)tlv;
@@ -3076,7 +3214,7 @@ int mt7925_mcu_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 	if (sreq->flags & NL80211_SCAN_FLAG_RANDOM_ADDR) {
 		get_random_mask_addr(misc->random_mac, sreq->mac_addr,
 				     sreq->mac_addr_mask);
-		req->scan_func |= SCAN_FUNC_RANDOM_MAC;
+		req->scan_func |= SCAN_FUNC_RANDOM_MAC | SCAN_FUNC_RANDOM_SN;
 	}
 
 	err = mt76_mcu_skb_send_msg(mdev, skb, MCU_UNI_CMD(SCAN_REQ),
@@ -3234,28 +3372,8 @@ mt7925_mcu_sched_scan_enable(struct mt76_phy *phy,
 int mt7925_mcu_cancel_hw_scan(struct mt76_phy *phy,
 			      struct ieee80211_vif *vif)
 {
-	/* MT7927/MT7929: disable RX filter and radio registers when scan completes. */
-	if (is_mt7927(phy->dev)) {
-		struct mt76_dev *mdev = phy->dev;
-		
-		if (!test_bit(MT76_HW_SCANNING, &phy->state))
-			return 0;
-		
-		dev_info(mdev->dev, "MT7927: Canceling register-based scan\n");
-		
-		/* Disable RX filter for scanning */
-		__mt76_wr(mdev, 0x820e3000, 0x0);
-		__mt76_wr(mdev, 0x820e3004, 0x0);
-		
-		/* Disable radio */
-		__mt76_wr(mdev, 0x820e3008, 0x0);
-		
-		clear_bit(MT76_HW_SCANNING, &phy->state);
-		
-		dev_info(mdev->dev, "MT7927: Register-based scan cancel complete\n");
-		return 0;
-	}
 	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
+	struct mt76_dev *mdev = phy->dev;
 	struct {
 		struct scan_hdr {
 			u8 seq_num;
@@ -3287,7 +3405,14 @@ int mt7925_mcu_cancel_hw_scan(struct mt76_phy *phy,
 		ieee80211_scan_completed(phy->hw, &info);
 	}
 
-	return mt76_mcu_send_msg(phy->dev, MCU_UNI_CMD(SCAN_REQ),
+	if (is_mt7927(mdev)) {
+		dev_info(mdev->dev, "MT7927: Sending UNI_SCAN_CANCEL\n");
+		/* For MT7927, send the cancel command via register-based interface */
+		return mt76_mcu_send_msg(mdev, MCU_UNI_CMD(SCAN_REQ),
+					 &req, sizeof(req), false);
+	}
+
+	return mt76_mcu_send_msg(mdev, MCU_UNI_CMD(SCAN_REQ),
 				 &req, sizeof(req), true);
 }
 EXPORT_SYMBOL_GPL(mt7925_mcu_cancel_hw_scan);
@@ -3299,6 +3424,7 @@ int mt7925_mcu_set_channel_domain(struct mt76_phy *phy)
 		dev_info(phy->dev->dev, "[MT7927] Skipping SET_DOMAIN_INFO (no mailbox)\n");
 		return 0;
 	}
+
 	int len, i, n_max_channels, n_2ch = 0, n_5ch = 0, n_6ch = 0;
 	struct {
 		struct {
@@ -3590,6 +3716,7 @@ int mt7925_mcu_set_rts_thresh(struct mt792x_phy *phy, u32 val)
 	/* MT7927: skip BAND_CONFIG RTS_THRESHOLD to avoid mailbox timeouts */
 	if (is_mt7927(&phy->dev->mt76))
 		return 0;
+
 	struct {
 		u8 band_idx;
 		u8 _rsv[3];
@@ -3821,12 +3948,13 @@ out:
 
 int mt7925_mcu_set_rate_txpower(struct mt76_phy *phy)
 {
+	int err;
+
 	/* MT7927: skip UNI SET_POWER_LIMIT to avoid timeouts */
 	if (is_mt7927(phy->dev)) {
 		dev_info(phy->dev->dev, "[MT7927] Skipping SET_POWER_LIMIT (no mailbox)\n");
 		return 0;
 	}
-	int err;
 
 	if (phy->cap.has_2ghz) {
 		err = mt7925_mcu_rate_txpower_band(phy,
@@ -3852,13 +3980,66 @@ int mt7925_mcu_set_rate_txpower(struct mt76_phy *phy)
 	return 0;
 }
 
+int mt7925_mcu_set_chan_info(struct mt792x_phy *phy, u16 tag)
+{
+	struct mt792x_dev *dev = phy->dev;
+	struct cfg80211_chan_def *chandef = &phy->mt76->chandef;
+	int freq1 = chandef->center_freq1;
+	struct {
+		u8 control_ch;
+		u8 center_ch;
+		u8 bw;
+		u8 tx_streams_num;
+		u8 rx_streams;	/* mask or num */
+		u8 switch_reason;
+		u8 band_idx;
+		u8 center_ch2;	/* for 80+80 only */
+		__le16 cac_case;
+		u8 channel_band;
+		u8 rsv0;
+		__le32 outband_freq;
+		u8 txpower_drop;
+		u8 ap_bw;
+		u8 ap_center_ch;
+		u8 rsv1[57];
+	} __packed req = {
+		.control_ch = chandef->chan->hw_value,
+		.center_ch = ieee80211_frequency_to_channel(freq1),
+		.bw = mt76_connac_chan_bw(chandef),
+		.tx_streams_num = hweight8(phy->mt76->antenna_mask),
+		.rx_streams = phy->mt76->antenna_mask,
+		.band_idx = phy != &dev->phy,
+	};
+
+	if (dev->mt76.hw->conf.flags & IEEE80211_CONF_OFFCHANNEL)
+		req.switch_reason = CH_SWITCH_SCAN_BYPASS_DPD;
+	else if (!cfg80211_reg_can_beacon(dev->mt76.hw->wiphy, chandef,
+					  NL80211_IFTYPE_AP))
+		req.switch_reason = CH_SWITCH_DFS;
+	else
+		req.switch_reason = CH_SWITCH_NORMAL;
+
+	if (tag == MCU_EXT_CMD(CHANNEL_SWITCH))
+		req.rx_streams = hweight8(req.rx_streams);
+
+	if (chandef->width == NL80211_CHAN_WIDTH_80P80) {
+		int freq2 = chandef->center_freq2;
+		req.center_ch2 = ieee80211_frequency_to_channel(freq2);
+	}
+
+	if (chandef->chan->band == NL80211_BAND_6GHZ)
+		req.channel_band = 2;
+	else
+		req.channel_band = chandef->chan->band;
+
+	return mt76_mcu_send_msg(&dev->mt76, tag, &req, sizeof(req), true);
+}
+EXPORT_SYMBOL_GPL(mt7925_mcu_set_chan_info);
+
 int mt7925_mcu_set_rxfilter(struct mt792x_dev *dev, u32 fif,
 			    u8 bit_op, u32 bit_map)
 {
 	struct mt792x_phy *phy = &dev->phy;
-	/* MT7927: skip BAND_CONFIG SET_MAC80211_RX_FILTER to avoid timeouts */
-	if (is_mt7927(&phy->dev->mt76))
-		return 0;
 	struct {
 		u8 band_idx;
 		u8 rsv1[3];
@@ -3881,6 +4062,10 @@ int mt7925_mcu_set_rxfilter(struct mt792x_dev *dev, u32 fif,
 		.bit_map = cpu_to_le32(bit_map),
 		.bit_op = bit_op,
 	};
+
+	/* MT7927: skip BAND_CONFIG SET_MAC80211_RX_FILTER to avoid timeouts */
+	if (is_mt7927(&phy->dev->mt76))
+		return 0;
 
 	return mt76_mcu_send_msg(&phy->dev->mt76, MCU_UNI_CMD(BAND_CONFIG),
 				 &req, sizeof(req), true);

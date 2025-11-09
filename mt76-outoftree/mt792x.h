@@ -137,6 +137,9 @@ struct mt792x_vif {
 	struct mt792x_bss_conf bss_conf; /* must be first */
 	struct mt792x_bss_conf __rcu *link_conf[IEEE80211_MLD_MAX_NUM_LINKS];
 
+	/* mt76 core per-vif data for link management (MLO/non-MLO) */
+	struct mt76_vif_data mt76;
+
 	struct mt792x_sta sta;
 	struct mt792x_sta *wep_sta;
 
@@ -415,6 +418,7 @@ void mt792x_sta_statistics(struct ieee80211_hw *hw,
 void mt792x_set_coverage_class(struct ieee80211_hw *hw, s16 coverage_class);
 void mt792x_dma_cleanup(struct mt792x_dev *dev);
 int mt792x_dma_enable(struct mt792x_dev *dev);
+int mt7927_dma_enable_engines(struct mt792x_dev *dev);  /* MT7927: Enable DMA after firmware */
 int mt792x_wpdma_reset(struct mt792x_dev *dev, bool force);
 int mt792x_wpdma_reinit_cond(struct mt792x_dev *dev);
 int mt792x_dma_disable(struct mt792x_dev *dev, bool force);
@@ -479,7 +483,7 @@ static inline char *mt792x_patch_name(struct mt792x_dev *dev)
 
 int mt792x_load_firmware(struct mt792x_dev *dev);
 
-/* MT7927 polling-based firmware loading (no mailbox protocol) */
+/* MT7927 MTK protocol firmware loading (register-based, no mailbox) */
 int mt7927_load_patch(struct mt76_dev *dev, const char *name);
 int mt7927_load_ram(struct mt76_dev *dev, const char *name);
 

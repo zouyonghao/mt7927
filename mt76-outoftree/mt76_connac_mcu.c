@@ -1161,12 +1161,6 @@ int mt76_connac_mcu_uni_add_dev(struct mt76_phy *phy,
 				bool enable)
 {
 	struct mt76_dev *dev = phy->dev;
-
-	/* MT7927/MT7929: ROM/RAM mailbox acks are not supported.
-	 * Skip DEV_INFO_UPDATE/BSS_INFO_UPDATE to avoid repeated timeouts.
-	 */
-	if (is_mt7927(dev))
-		return 0;
 	struct {
 		struct {
 			u8 omac_idx;
@@ -1217,6 +1211,12 @@ int mt76_connac_mcu_uni_add_dev(struct mt76_phy *phy,
 	};
 	int err, idx, cmd, len;
 	void *data;
+
+	/* MT7927/MT7929: ROM/RAM mailbox acks are not supported.
+	 * Skip DEV_INFO_UPDATE/BSS_INFO_UPDATE to avoid repeated timeouts.
+	 */
+	if (is_mt7927(dev))
+		return 0;
 
 	switch (bss_conf->vif->type) {
 	case NL80211_IFTYPE_MESH_POINT:

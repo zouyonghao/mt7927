@@ -1208,9 +1208,23 @@ void mt7925_queue_rx_skb(struct mt76_dev *mdev, enum mt76_rxq_id q,
 	__le32 *end = (__le32 *)&skb->data[skb->len];
 	enum rx_pkt_type type;
 	u16 flag;
+	static unsigned long last_rx_log = 0;
+	static int rx_count = 0;
 
 	type = le32_get_bits(rxd[0], MT_RXD0_PKT_TYPE);
 	flag = le32_get_bits(rxd[0], MT_RXD0_PKT_FLAG);
+	
+	/* MT7927: Log RX activity to verify packets are being received */
+	if (is_mt7927(mdev)) {
+		rx_count++;
+		if (time_after(jiffies, last_rx_log + HZ)) { /* Log once per second */
+			dev_info(mdev->dev, "[MT7927-RX] Received %d packets (type=%d, flag=0x%x)\n",
+				 rx_count, type, flag);
+			last_rx_log = jiffies;
+			rx_count = 0;
+		}
+	}
+	
 	if (type != PKT_TYPE_NORMAL) {
 		u32 sw_type = le32_get_bits(rxd[0], MT_RXD0_SW_PKT_TYPE_MASK);
 
