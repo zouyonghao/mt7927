@@ -27,3 +27,4 @@ mt76-outoftree/modules.order
 android_kernel_modules_nothing_mt6878-mt6878-Tetris-u/
 # gen4-mt7902/
 u.zip
+bsp-rodin-v-oss.zip
