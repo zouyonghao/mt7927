@@ -1033,7 +1033,7 @@ struct GLUE_INFO {
 #endif /* CFG_SUPPORT_TX_FREE_SKB_WORK */
 
 #if CFG_SUPPORT_RX_GRO
-	struct net_device dummy_dev;
+	struct net_device *dummy_dev;
 	struct napi_struct napi;
 	OS_SYSTIME tmGROFlushTimeout;
 	spinlock_t napi_spinlock;

@@ -14990,7 +14990,7 @@ uint8_t kalRxGroInit(struct net_device *prDev)
 void kalNapiThreadedInit(struct GLUE_INFO *prGlueInfo)
 {
 #if KERNEL_VERSION(5, 15, 0) <= CFG80211_VERSION_CODE
-	if (dev_set_threaded(&prGlueInfo->dummy_dev, TRUE) != 0) {
+	if (dev_set_threaded(prGlueInfo->dummy_dev, TRUE) != 0) {
 		prGlueInfo->napi_thread = NULL;
 		DBGLOG(INIT, ERROR, "Napi Threaded Init Fail\n");
 	} else {
@@ -15014,12 +15014,12 @@ uint8_t kalNapiInit(struct GLUE_INFO *prGlueInfo)
 	spin_lock_init(&prGlueInfo->napi_spinlock);
 	skb_queue_head_init(&prGlueInfo->rRxNapiSkbQ);
 	/* use dummy device to register napi */
-	// init_dummy_netdev(&prGlueInfo->dummy_dev);
+	prGlueInfo->dummy_dev = alloc_netdev_dummy(0);
 #if (KERNEL_VERSION(6, 1, 0) <= CFG80211_VERSION_CODE)
-	netif_napi_add(&prGlueInfo->dummy_dev, &prGlueInfo->napi,
+	netif_napi_add(prGlueInfo->dummy_dev, &prGlueInfo->napi,
 			kalNapiPoll);
 #else
-	netif_napi_add(&prGlueInfo->dummy_dev, &prGlueInfo->napi,
+	netif_napi_add(prGlueInfo->dummy_dev, &prGlueInfo->napi,
 			kalNapiPoll, NAPI_POLL_WEIGHT);
 #endif
 #if CFG_SUPPORT_RX_NAPI_THREADED
@@ -15035,6 +15035,7 @@ uint8_t kalNapiInit(struct GLUE_INFO *prGlueInfo)
 uint8_t kalNapiUninit(struct GLUE_INFO *prGlueInfo)
 {
 	netif_napi_del(&prGlueInfo->napi);
+	free_netdev(prGlueInfo->dummy_dev);
 #if CFG_SUPPORT_RX_NAPI_THREADED
 	kalNapiThreadedUninit(prGlueInfo);
 #endif /* CFG_SUPPORT_RX_NAPI_THREADED */
