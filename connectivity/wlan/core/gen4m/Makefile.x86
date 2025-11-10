@@ -11,15 +11,19 @@
 LINUX_SRC=/lib/modules/$(shell uname -r)/build
 
 export CONFIG_MTK_COMBO_PLATFORM=x86
-export MTK_COMBO_CHIP=MT6632
+export MTK_COMBO_CHIP=MT6639
 
 ifneq ($(MODULE_NAME),)
 export MTK_COMBO_CHIP=$(MODULE_NAME)
 endif
 
-ifneq ($(WM_RAM),)
-export WM_RAM=$(WM_RAM)
-endif
+#ifneq ($(WM_RAM),)
+#export WM_RAM=$(WM_RAM)
+#endif
+
+#export WM_RAM=mobile
+export WM_RAM=ce
+export hif=pcie
 
 PWD=$(shell pwd)
 DRIVER_DIR=$(PWD)
@@ -131,6 +135,8 @@ PLATFORM_FLAGS += -Wno-error=empty-body
 PLATFORM_FLAGS += -Wno-error=incompatible-pointer-types
 PLATFORM_FLAGS += -DCFG_MTK_WIFI_CONNV3_SUPPORT=0
 
+PLATFORM_FLAGS += -DCFG_ENABLE_FW_DOWNLOAD=1
+
 ifneq ($(CFG_DFS_CHSW_FORCE_BW20),)
 PLATFORM_FLAGS += -DCFG_DFS_CHSW_FORCE_BW20=$(CFG_DFS_CHSW_FORCE_BW20)
 endif
@@ -218,6 +224,8 @@ endif
 ifeq ($(USB_AUTO_SUSPEND), y)
 PLATFORM_FLAGS += -DCFG_USB_AUTO_SUSPEND
 endif
+
+export PLATFORM_FLAGS
 
 all: driver
 

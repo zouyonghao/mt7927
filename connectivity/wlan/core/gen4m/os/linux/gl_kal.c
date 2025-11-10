@@ -355,6 +355,7 @@ void tracing_mark_write(const char *fmt, ...)
 uint32_t kalFirmwareOpen(struct GLUE_INFO *prGlueInfo,
 			 uint8_t **apucNameTable)
 {
+	DBGLOG(INIT, INFO, "kalFirmwareOpen");
 	uint8_t ucNameIdx;
 	/* PPUINT_8 apucNameTable; */
 	uint8_t ucCurEcoVer = wlanGetEcoVersion(
@@ -7660,6 +7661,7 @@ int32_t kalRequestFirmware(const uint8_t *pucPath,
 		uint8_t **ppucData, uint32_t *pu4ReadSize,
 		uint8_t ucIsZeroPadding, struct device *dev)
 {
+	DBGLOG(INIT, INFO, "kalRequestFirmware");
 	const struct firmware *fw;
 	uint8_t *pucData = NULL;
 	uint32_t u4Size;

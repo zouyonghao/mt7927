@@ -65,6 +65,29 @@ void nicpmWakeUpWiFi(struct ADAPTER *prAdapter)
 		return;
 	}
 	HAL_WAKE_UP_WIFI(prAdapter);
+
+#if CFG_ENABLE_FW_DOWNLOAD
+	/* Test direct firmware loading */
+	{
+		uint32_t u4Status;
+		uint8_t *apucNameTable[] = {
+			"mediatek/mt6639/WIFI_RAM_CODE_MT6639_2_1.bin",
+			NULL
+		};
+
+		DBGLOG(INIT, INFO, "=== Direct FW Load Test Start ===\n");
+		u4Status = kalFirmwareOpen(prAdapter->prGlueInfo,
+					   apucNameTable);
+		if (u4Status == WLAN_STATUS_SUCCESS) {
+			DBGLOG(INIT, INFO, "FW Load Success!\n");
+			kalFirmwareClose(prAdapter->prGlueInfo);
+		} else {
+			DBGLOG(INIT, ERROR, "FW Load Failed! status=%u\n",
+			       u4Status);
+		}
+		DBGLOG(INIT, INFO, "=== Direct FW Load Test End ===\n");
+	}
+#endif
 }
 
 /*----------------------------------------------------------------------------*/
