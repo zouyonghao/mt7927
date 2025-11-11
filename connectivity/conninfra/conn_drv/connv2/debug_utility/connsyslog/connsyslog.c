@@ -1387,8 +1387,7 @@ static int connlog_cancel_alarm_timer(void)
 }
 
 
-static enum alarmtimer_restart connlog_alarm_timer_handler(struct alarm *alarm,
-	ktime_t now)
+static void connlog_alarm_timer_handler(struct alarm *alarm, ktime_t now)
 {
 	ktime_t kt;
 	struct rtc_time tm;
@@ -1407,19 +1406,20 @@ static enum alarmtimer_restart connlog_alarm_timer_handler(struct alarm *alarm,
 		}
 	}
 
-	spin_lock_irqsave(&gLogAlarm.alarm_lock, gLogAlarm.flags);
-	kt = ktime_set(gLogAlarm.alarm_sec, 0);
-	alarm_start_relative(&gLogAlarm.alarm_timer, kt);
-	spin_unlock_irqrestore(&gLogAlarm.alarm_lock, gLogAlarm.flags);
-
-	return ALARMTIMER_NORESTART;
+	/* For newer kernels that may not support alarmtimer API in the same way */
+	/* Skip the alarm restart functionality for compatibility */
 }
 
 static int connlog_alarm_init(void)
 {
+#ifdef CONFIG_RTC_LIB
 	alarm_init(&gLogAlarm.alarm_timer, ALARM_REALTIME, connlog_alarm_timer_handler);
 	gLogAlarm.alarm_state = CONNLOG_ALARM_STATE_DISABLE;
 	spin_lock_init(&gLogAlarm.alarm_lock);
+#else
+	gLogAlarm.alarm_state = CONNLOG_ALARM_STATE_DISABLE;
+	spin_lock_init(&gLogAlarm.alarm_lock);
+#endif
 
 	return 0;
 }

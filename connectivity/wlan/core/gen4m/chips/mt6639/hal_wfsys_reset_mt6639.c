@@ -29,6 +29,9 @@
 #include "coda/mt6639/wf_top_cfg_on.h"
 #include "coda/mt6639/wf_wfdma_host_dma0.h"
 
+/* For PCI device ID access */
+#include <linux/pci.h>
+
 #if CFG_CHIP_RESET_SUPPORT
 /*******************************************************************************
 *                              C O N S T A N T S
@@ -81,6 +84,47 @@ u_int8_t mt6639HalCbInfraRguWfRst(struct ADAPTER *prAdapter,
 {
 	uint32_t u4AddrVal;
 	uint32_t u4CrVal = 0;
+	uint16_t device_id = 0;
+	struct pci_dev *pdev = NULL;
+
+	/* Check if this is actually an MT7927 device to use different reset logic */
+	pdev = (struct pci_dev *)prAdapter->prGlueInfo->rHifInfo.pdev;
+	if (pdev) {
+		pci_read_config_word(pdev, PCI_DEVICE_ID, &device_id);
+		DBGLOG(HAL, INFO, "Reset function: Detected device ID: 0x%04x\n", device_id);
+		
+		/* If this is MT7927, use MT7925-style reset sequence */
+		if (device_id == 0x7927) {
+			DBGLOG(HAL, INFO, "MT7927 device detected, using MT7925-style reset\n");
+			
+			if (fgAssertRst) {
+				mt6639GetSemaphore(prAdapter);
+				/*A.1*/
+				u4AddrVal = CBTOP_RGU_BASE;
+				HAL_MCR_RD(prAdapter, u4AddrVal, &u4CrVal);
+				DBGLOG(HAL, INFO, "MT7927 Read cr_bus_rst 0x%x: 0x%x\n",
+					u4AddrVal, u4CrVal);
+				
+				/* Use MT7925 reset bit instead of MT6639 - reset whole path */
+				u4CrVal |= CB_INFRA_RGU_WF_SUBSYS_RST_WF_WHOLE_PATH_RST_MASK;
+				HAL_MCR_WR(prAdapter, u4AddrVal, u4CrVal);
+				DBGLOG(HAL, INFO,
+					"MT7927 - Write assert cr_bus_rst 0x%x[0]: 0x%x\n",
+					u4AddrVal, u4CrVal);
+			} else {
+				/*e.1*/
+				u4AddrVal = CBTOP_RGU_BASE;
+				HAL_MCR_RD(prAdapter, u4AddrVal, &u4CrVal);
+				DBGLOG(HAL, INFO, "MT7927 E. Read 0x%x: 0x%x\n", u4AddrVal, u4CrVal);
+
+				u4CrVal &= ~CB_INFRA_RGU_WF_SUBSYS_RST_WF_WHOLE_PATH_RST_MASK;
+
+				HAL_MCR_WR(prAdapter, u4AddrVal, u4CrVal);
+			}
+
+			return TRUE;
+		}
+	}
 
 	if (fgAssertRst) {
 		mt6639GetSemaphore(prAdapter);
@@ -126,9 +170,24 @@ u_int8_t mt6639HalPollWfsysSwInitDone(struct ADAPTER *prAdapter)
 	uint32_t u4CrValue = 0;
 	uint32_t u4ResetTimeCnt = 0, u4ResetTimeTmout = 2;
 	u_int8_t fgSwInitDone = TRUE;
+	uint16_t device_id = 0;
+	struct pci_dev *pdev = NULL;
 
 #define MMIO_READ_FAIL	0xFFFFFFFF
 #define MCU_IDLE	0x1D1E
+	
+	/* Check if this is actually an MT7927 device to adjust polling parameters */
+	pdev = (struct pci_dev *)prAdapter->prGlueInfo->rHifInfo.pdev;
+	if (pdev) {
+		pci_read_config_word(pdev, PCI_DEVICE_ID, &device_id);
+		DBGLOG(HAL, INFO, "Polling function: Detected device ID: 0x%04x\n", device_id);
+		
+		/* If this is MT7927, use longer timeout for MT7927 */
+		if (device_id == 0x7927) {
+			DBGLOG(HAL, INFO, "MT7927 device detected, using extended timeout for polling\n");
+			u4ResetTimeTmout = 20; // Increase timeout for MT7927
+		}
+	}
 
 	/* Polling until WF WM is done */
 	while (TRUE) {
@@ -336,17 +395,35 @@ u_int8_t mt6639HalPollWfsysSwInitDone(struct ADAPTER *prAdapter)
 	uint32_t u4ResetTimeCnt = 0, u4ResetTimeTmout = 2;
 	u_int8_t fgStatus;
 	u_int8_t fgSwInitDone = TRUE;
+	uint16_t device_id = 0;
+	struct pci_dev *pdev = NULL;
 
 #define MCU_IDLE		0x1D1E
+
+	/* Check if this is actually an MT7927 device to adjust polling parameters */
+	pdev = (struct pci_dev *)prAdapter->prGlueInfo->rHifInfo.pdev;
+	if (pdev) {
+		pci_read_config_word(pdev, PCI_DEVICE_ID, &device_id);
+		DBGLOG(HAL, INFO, "Polling function: Detected device ID: 0x%04x\n", device_id);
+		
+		/* If this is MT7927, use longer timeout for MT7927 */
+		if (device_id == 0x7927) {
+			DBGLOG(HAL, INFO, "MT7927 device detected, using extended timeout for polling\n");
+			u4ResetTimeTmout = 20; // Increase timeout for MT7927
+		}
+	}
 
 	/* polling until WF WM is ready */
 	while (TRUE) {
 		HAL_UHW_RD(prAdapter, WF_TOP_CFG_ON_ROMCODE_INDEX_REMAP_ADDR,
 			&u4CrValue, &fgStatus);
 
-		if (!fgStatus)
+		if (!fgStatus) {
 			DBGLOG(HAL, ERROR, "UHW read WF_TOP_CFG_ON CR fail\n");
-		else if (u4CrValue == MCU_IDLE) {
+			DBGLOG(HAL, ERROR, "[SER][L0.5] UHW read CR fail\n");
+			fgSwInitDone = FALSE;
+			break;
+		} else if (u4CrValue == MCU_IDLE) {
 			DBGLOG(HAL, INFO,
 				"UHW read WF_TOP_CFG_ON_ROMCODE_INDEX_ADDR: 0x%x\n",
 				u4CrValue);
@@ -359,6 +436,8 @@ u_int8_t mt6639HalPollWfsysSwInitDone(struct ADAPTER *prAdapter)
 		if (u4ResetTimeCnt >= u4ResetTimeTmout) {
 			DBGLOG(INIT, ERROR,
 				   "L0.5 Reset polling sw init done timeout\n");
+			DBGLOG(INIT, ERROR,
+				   "[SER][L0.5] Poll Sw Init Done FAIL\n");
 			fgSwInitDone = FALSE;
 			break;
 		}

@@ -71,10 +71,12 @@
 ********************************************************************************
 */
 
+#ifdef CONFIG_OF
 extern const struct of_device_id apconninfra_of_ids[];
+#endif
 
 static int mtk_conninfra_probe(struct platform_device *pdev);
-static int mtk_conninfra_remove(struct platform_device *pdev);
+static void mtk_conninfra_remove(struct platform_device *pdev);
 
 static struct platform_driver mtk_conninfra_dev_drv = {
 	.probe = mtk_conninfra_probe,
@@ -643,10 +645,16 @@ int mtk_conninfra_probe(struct platform_device *pdev)
 		return -1;
 	}
 
-	pr_info("[%s] --- [%x][%x] of_node[%s][%s]", __func__,
+#ifdef CONFIG_OF
+	pr_info("[%s] --- [%p][%p] of_node[%s][%s]", __func__,
 				pdev->dev.driver->of_match_table, apconninfra_of_ids,
 				(pdev->dev.of_node != NULL ? pdev->dev.of_node->name : ""),
 				(pdev->dev.of_node != NULL ? pdev->dev.of_node->full_name : ""));
+#else
+	pr_info("[%s] --- of_node[%s][%s]", __func__,
+				(pdev->dev.of_node != NULL ? pdev->dev.of_node->name : ""),
+				(pdev->dev.of_node != NULL ? pdev->dev.of_node->full_name : ""));
+#endif
 
 	ret = consys_hw_init(pdev, &g_conninfra_dev_cb);
 	if (ret) {
@@ -674,14 +682,12 @@ int mtk_conninfra_probe(struct platform_device *pdev)
 	return 0;
 }
 
-int mtk_conninfra_remove(struct platform_device *pdev)
+void mtk_conninfra_remove(struct platform_device *pdev)
 {
 	atomic_set(&g_connv2_hw_init_done, 0);
 	consys_hw_deinit();
 	if (g_drv_dev)
 		g_drv_dev = NULL;
-
-	return 0;
 }
 
 

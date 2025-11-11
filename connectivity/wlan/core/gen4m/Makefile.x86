@@ -133,6 +133,7 @@ PLATFORM_FLAGS += -I/home/zyh/mt7927-test/connectivity/conninfra/include
 PLATFORM_FLAGS += -Wno-error=missing-prototypes
 PLATFORM_FLAGS += -Wno-error=empty-body
 PLATFORM_FLAGS += -Wno-error=incompatible-pointer-types
+# CONNV3 is for MOBILE segment only, not needed for CE segment builds on x86
 PLATFORM_FLAGS += -DCFG_MTK_WIFI_CONNV3_SUPPORT=0
 
 PLATFORM_FLAGS += -DCFG_ENABLE_FW_DOWNLOAD=1

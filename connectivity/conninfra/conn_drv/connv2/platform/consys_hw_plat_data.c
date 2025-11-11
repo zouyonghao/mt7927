@@ -7,6 +7,7 @@
 ********************************************************************************
 */
 #include <linux/of_device.h>
+#include <linux/module.h>
 
 #include "consys_hw.h"
 
@@ -161,4 +162,8 @@ const struct of_device_id apconninfra_of_ids[] = {
 	},
 	{}
 };
+#endif
+
+#ifdef CONFIG_OF
+EXPORT_SYMBOL(apconninfra_of_ids);
 #endif

@@ -8,6 +8,7 @@
 */
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/module.h>
 #include "connv3_hw.h"
 
 /*******************************************************************************
@@ -63,4 +64,8 @@ const struct of_device_id connv3_of_ids[] = {
 	},
 	{}
 };
+#endif
+
+#ifdef CONFIG_OF
+EXPORT_SYMBOL(connv3_of_ids);
 #endif

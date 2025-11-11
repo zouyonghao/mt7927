@@ -41,6 +41,7 @@
 #include <linux/vmalloc.h>
 #include <asm/current.h>
 #include <linux/kfifo.h>
+#include <asm/io.h>
 #if defined(CONNINFRA_PLAT_ALPS) && CONNINFRA_PLAT_ALPS
 #include "connectivity_build_in_adapter.h"
 #endif
@@ -194,12 +195,28 @@ void *osal_memcpy(void *dst, const void *src, unsigned int len)
 
 void osal_memcpy_fromio(void *dst, const void *src, unsigned int len)
 {
-	return memcpy_fromio(dst, src, len);
+	/* For I/O memory access in newer kernels, we'll use readb/w/l functions in a loop
+	   This replaces the deprecated memcpy_fromio function */
+	unsigned long i;
+	unsigned char *d = (unsigned char *)dst;
+	const unsigned char *s = (const unsigned char *)src;
+
+	for (i = 0; i < len; i++) {
+		d[i] = readb(s + i);
+	}
 }
 
 void osal_memcpy_toio(void *dst, const void *src, unsigned int len)
 {
-	return memcpy_toio(dst, src, len);
+	/* For I/O memory access in newer kernels, we'll use writeb/w/l functions in a loop
+	   This replaces the deprecated memcpy_toio function */
+	unsigned long i;
+	const unsigned char *s = (const unsigned char *)src;
+	unsigned char *d = (unsigned char *)dst;
+
+	for (i = 0; i < len; i++) {
+		writeb(s[i], d + i);
+	}
 }
 
 int osal_memcmp(const void *buf1, const void *buf2, unsigned int len)

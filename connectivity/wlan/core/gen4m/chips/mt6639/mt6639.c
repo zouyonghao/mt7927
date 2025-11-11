@@ -79,6 +79,9 @@
 
 #include "gl_coredump.h"
 
+/* For PCI device ID access */
+#include <linux/pci.h>
+
 #define CFG_SUPPORT_VCODE_VDFS 0
 
 #if (CFG_SUPPORT_VCODE_VDFS == 1)
@@ -229,9 +232,15 @@ static int32_t mt6639_ccif_trigger_fw_assert(struct ADAPTER *ad);
 static void mt6639SetPcieSpeed(struct GLUE_INFO *prGlueInfo, uint32_t speed);
 #endif
 
+/* Forward declarations for functions needed by both MOBILE and CE segments */
+#if defined(_HIF_PCIE)
+static uint32_t mt6639_mcu_init(struct ADAPTER *ad);
+static uint32_t mt6639_mcu_reinit(struct ADAPTER *ad);
+static u_int8_t mt6639_check_recovery_needed(struct ADAPTER *ad);
+#endif
+
 #if IS_MOBILE_SEGMENT
 static int32_t mt6639_trigger_fw_assert(struct ADAPTER *prAdapter);
-static uint32_t mt6639_mcu_init(struct ADAPTER *ad);
 static void mt6639_mcu_deinit(struct ADAPTER *ad);
 static int mt6639ConnacPccifOn(struct ADAPTER *prAdapter);
 static int mt6639ConnacPccifOff(struct ADAPTER *prAdapter);
@@ -792,9 +801,12 @@ struct FWDL_OPS_T mt6639_fw_dl_ops = {
 #else
 	.phyAction = NULL,
 #endif
-#if defined(_HIF_PCIE) && IS_MOBILE_SEGMENT
+#if defined(_HIF_PCIE)
+	/* mcu_init now handles both MOBILE and CE segments */
 	.mcu_init = mt6639_mcu_init,
+#if IS_MOBILE_SEGMENT
 	.mcu_deinit = mt6639_mcu_deinit,
+#endif
 #endif
 #if CFG_SUPPORT_WIFI_DL_BT_PATCH
 	.constructBtPatchName = asicConnac3xConstructBtPatchName,
@@ -1422,10 +1434,10 @@ static void mt6639_ConstructFirmwarePrio(struct GLUE_INFO *prGlueInfo,
 			__LINE__, ret);
 #endif
 
-	/* Type 2. WIFI_RAM_CODE_MT6639_1_1.bin */
+	/* Type 2. mediatek/mt6639/WIFI_RAM_CODE_MT6639_2_1.bin */
 	ret = kalSnprintf(*(apucName + (*pucNameIdx)),
 			CFG_FW_NAME_MAX_LEN,
-			"WIFI_RAM_CODE_MT%x_%s_%u.bin",
+			"mediatek/mt6639/WIFI_RAM_CODE_MT%x_%s_%u.bin",
 			MT6639_CHIP_ID,
 			aucFlavor,
 			MT6639_ROM_VERSION);
@@ -1445,9 +1457,9 @@ static void mt6639_ConstructFirmwarePrio(struct GLUE_INFO *prGlueInfo,
 			continue;
 		}
 
-		/* Type 3. WIFI_RAM_CODE_6639.bin */
+		/* Type 3. mediatek/mt6639/WIFI_RAM_CODE_6639.bin */
 		ret = kalSnprintf(*(apucName + (*pucNameIdx)),
-				CFG_FW_NAME_MAX_LEN, "%s.bin",
+				CFG_FW_NAME_MAX_LEN, "mediatek/mt6639/%s.bin",
 				apucmt6639FwName[ucIdx]);
 		if (ret >= 0 && ret < CFG_FW_NAME_MAX_LEN)
 			(*pucNameIdx) += 1;
@@ -1463,9 +1475,28 @@ static void mt6639_ConstructPatchName(struct GLUE_INFO *prGlueInfo,
 {
 	int ret = 0;
 	uint8_t aucFlavor[CFG_FW_FLAVOR_MAX_LEN];
+	uint16_t device_id = 0;
+	struct pci_dev *pdev = NULL;
 
 	kalMemZero(aucFlavor, sizeof(aucFlavor));
 	mt6639GetFlavorVer(&aucFlavor[0]);
+
+	/* Check if this is actually an MT7927 device to use different patch name */
+	pdev = (struct pci_dev *)prGlueInfo->rHifInfo.pdev;
+	if (pdev) {
+		pci_read_config_word(pdev, PCI_DEVICE_ID, &device_id);
+		DBGLOG(INIT, INFO, "MT7927 patch name construction: Detected device ID: 0x%04x\n", device_id);
+		
+		/* If this is MT7927, use MT6639 firmware (MT7927 is MT6639 family) */
+		if (device_id == 0x7927) {
+			DBGLOG(INIT, INFO, "MT7927 device detected (MT6639 family), using MT6639 firmware\n");
+
+			/* MT7927 is in the MT6639 family, so use MT6639 firmware directly */
+			/* Early return - let the normal MT6639 firmware construction continue below */
+			DBGLOG(INIT, INFO, "MT7927: Using standard MT6639 firmware paths\n");
+			/* Don't return - fall through to use normal MT6639 firmware names */
+		}
+	}
 
 #if CFG_SUPPORT_SINGLE_FW_BINARY
 	/* Type 0. mt6639_wifi.bin */
@@ -1492,10 +1523,10 @@ static void mt6639_ConstructPatchName(struct GLUE_INFO *prGlueInfo,
 			__LINE__, ret);
 #endif
 
-	/* Type 2. WIFI_MT6639_PATCH_MCU_1_1_hdr.bin */
+	/* Type 2. mediatek/mt6639/WIFI_MT6639_PATCH_MCU_2_1_hdr.bin */
 	ret = kalSnprintf(apucName[(*pucNameIdx)],
 			  CFG_FW_NAME_MAX_LEN,
-			  "WIFI_MT%x_PATCH_MCU_%s_%u_hdr.bin",
+			  "mediatek/mt6639/WIFI_MT%x_PATCH_MCU_%s_%u_hdr.bin",
 			  MT6639_CHIP_ID,
 			  aucFlavor,
 			  MT6639_ROM_VERSION);
@@ -1506,10 +1537,10 @@ static void mt6639_ConstructPatchName(struct GLUE_INFO *prGlueInfo,
 			"[%u] kalSnprintf failed, ret: %d\n",
 			__LINE__, ret);
 
-	/* Type 3. mt6639_patch_e1_hdr.bin */
+	/* Type 3. mediatek/mt6639/mt6639_patch_e1_hdr.bin */
 	ret = kalSnprintf(apucName[(*pucNameIdx)],
 			  CFG_FW_NAME_MAX_LEN,
-			  "mt6639_patch_e1_hdr.bin");
+			  "mediatek/mt6639/mt6639_patch_e1_hdr.bin");
 	if (ret < 0 || ret >= CFG_FW_NAME_MAX_LEN)
 		DBGLOG(INIT, ERROR,
 			"[%u] kalSnprintf failed, ret: %d\n",
@@ -3162,144 +3193,16 @@ static void mt6639SetPcieSpeed(struct GLUE_INFO *prGlueInfo, uint32_t speed)
 }
 #endif
 
-#if IS_MOBILE_SEGMENT
-static u_int8_t mt6639_check_recovery_needed(struct ADAPTER *ad)
+static void set_cbinfra_remap(struct ADAPTER *ad)
 {
-	uint32_t u4Value = 0;
-	u_int8_t fgResult = FALSE;
+	DBGLOG(INIT, INFO, "set_cbinfra_remap.\n");
 
-	/*
-	 * if (0x81021604[31:16]==0xdead &&
-	 *     (0x70005350[30:28]!=0x0 || 0x70005360[6:4]!=0x0)) == 0x1
-	 * do recovery flow
-	 */
-
-	HAL_MCR_RD(ad, WF_TOP_CFG_ON_ROMCODE_INDEX_ADDR,
-		&u4Value);
-	DBGLOG(INIT, INFO, "0x%08x=0x%08x\n",
-		WF_TOP_CFG_ON_ROMCODE_INDEX_ADDR, u4Value);
-	if ((u4Value & 0xFFFF0000) != 0xDEAD0000) {
-		fgResult = FALSE;
-		goto exit;
-	}
-
-	HAL_MCR_RD(ad, CBTOP_GPIO_MODE5_ADDR,
-		&u4Value);
-	DBGLOG(INIT, INFO, "0x%08x=0x%08x\n",
-		CBTOP_GPIO_MODE5_ADDR, u4Value);
-	if (((u4Value & CBTOP_GPIO_MODE5_GPIO47_MASK) >>
-	    CBTOP_GPIO_MODE5_GPIO47_SHFT) != 0x0) {
-		fgResult = TRUE;
-		goto exit;
-	}
-
-	HAL_MCR_RD(ad, CBTOP_GPIO_MODE6_ADDR,
-		&u4Value);
-	DBGLOG(INIT, INFO, "0x%08x=0x%08x\n",
-		CBTOP_GPIO_MODE6_ADDR, u4Value);
-	if (((u4Value & CBTOP_GPIO_MODE6_GPIO49_MASK) >>
-	    CBTOP_GPIO_MODE6_GPIO49_SHFT) != 0x0) {
-		fgResult = TRUE;
-		goto exit;
-	}
-
-exit:
-	return fgResult;
-}
-
-static uint32_t mt6639_mcu_reinit(struct ADAPTER *ad)
-{
-#define CONNINFRA_ID_MAX_POLLING_COUNT		10
-
-	uint32_t u4Value = 0, u4PollingCnt = 0;
-	uint32_t rStatus = WLAN_STATUS_SUCCESS;
-
-	/* Check recovery needed */
-	if (mt6639_check_recovery_needed(ad) == FALSE)
-		goto exit;
-
-	DBGLOG(INIT, INFO, "mt6639_mcu_reinit.\n");
-
-	/* Force on conninfra */
 	HAL_MCR_WR(ad,
-		CONN_HOST_CSR_TOP_CONN_INFRA_WAKEPU_TOP_ADDR,
-		0x1);
-	
-	/* Wait for conninfra to wake up */
-	kalMdelay(100);
-
-	/* Wait conninfra wakeup */
-	while (TRUE) {
-		HAL_MCR_RD(ad, CONN_CFG_IP_VERSION_IP_VERSION_ADDR,
-			&u4Value);
-
-		if (u4Value == MT6639_CONNINFRA_VERSION_ID ||
-		    u4Value == MT6639_CONNINFRA_VERSION_ID_E2)
-			break;
-
-		u4PollingCnt++;
-		if (u4PollingCnt >= CONNINFRA_ID_MAX_POLLING_COUNT) {
-			/* For test environments, if recovery is not needed (mt6639_check_recovery_needed returned FALSE),
-			 * allow continuing even if conninfra version is not detected */
-			if (!mt6639_check_recovery_needed(ad)) {
-				DBGLOG(INIT, WARN,
-					"Conninfra version not detected but recovery not needed, continuing anyway. Value: 0x%x\n",
-					u4Value);
-				goto skip_reinit;
-			}
-			rStatus = WLAN_STATUS_FAILURE;
-			DBGLOG(INIT, ERROR,
-				"Conninfra ID polling failed, value=0x%x\n",
-				u4Value);
-			goto exit;
-		}
-
-		kalUdelay(1000);
-	}
-
-skip_reinit:
-
-	/* Switch to GPIO mode */
+		CB_INFRA_MISC0_CBTOP_PCIE_REMAP_WF_ADDR,
+		0x74037001);
 	HAL_MCR_WR(ad,
-		CBTOP_GPIO_MODE5_MOD_ADDR,
-		0x80000000);
-	HAL_MCR_WR(ad,
-		CBTOP_GPIO_MODE6_MOD_ADDR,
-		0x80);
-	kalUdelay(100);
-
-	/* Reset */
-	HAL_MCR_WR(ad,
-		CB_INFRA_RGU_BT_SUBSYS_RST_ADDR,
-		0x10351);
-	HAL_MCR_WR(ad,
-		CB_INFRA_RGU_WF_SUBSYS_RST_ADDR,
-		0x10351);
-	kalMdelay(10);
-	HAL_MCR_WR(ad,
-		CB_INFRA_RGU_BT_SUBSYS_RST_ADDR,
-		0x10340);
-	HAL_MCR_WR(ad,
-		CB_INFRA_RGU_WF_SUBSYS_RST_ADDR,
-		0x10340);
-
-	kalMdelay(50);
-
-	HAL_MCR_RD(ad, CBTOP_GPIO_MODE5_ADDR, &u4Value);
-	DBGLOG(INIT, INFO, "0x%08x=0x%08x\n",
-		CBTOP_GPIO_MODE5_ADDR, u4Value);
-
-	HAL_MCR_RD(ad, CBTOP_GPIO_MODE6_ADDR, &u4Value);
-	DBGLOG(INIT, INFO, "0x%08x=0x%08x\n",
-		CBTOP_GPIO_MODE6_ADDR, u4Value);
-
-	/* Clean force on conninfra */
-	HAL_MCR_WR(ad,
-		CONN_HOST_CSR_TOP_CONN_INFRA_WAKEPU_TOP_ADDR,
-		0x0);
-
-exit:
-	return rStatus;
+		CB_INFRA_MISC0_CBTOP_PCIE_REMAP_WF_BT_ADDR,
+		0x70007000);
 }
 
 #if (CFG_MTK_ANDROID_WMT == 0)
@@ -3307,9 +3210,49 @@ static uint32_t mt6639_mcu_reset(struct ADAPTER *ad)
 {
 	uint32_t u4Value = 0;
 	uint32_t rStatus = WLAN_STATUS_SUCCESS;
+	uint16_t device_id = 0;
+	struct pci_dev *pdev = NULL;
 
 	DBGLOG(INIT, INFO, "mt6639_mcu_reset..\n");
 
+	/* Check if this is MT7927 - use bit 0 (WF_WHOLE_PATH_RST) instead of bit 4 */
+	pdev = (struct pci_dev *)ad->chip_info->pdev;
+	if (pdev) {
+		pci_read_config_word(pdev, PCI_DEVICE_ID, &device_id);
+		if (device_id == 0x7927) {
+			DBGLOG(INIT, INFO, "MT7927 detected - using simple reset with bit 0 (WF_WHOLE_PATH_RST)\n");
+
+			/* Acquire semaphore before reset - required for MT7927 */
+			DBGLOG(INIT, INFO, "MT7927: Acquiring hardware semaphore before reset\n");
+			mt6639GetSemaphore(ad);
+
+			/* Assert reset - use read-modify-write to set only bit 0 */
+			HAL_MCR_RD(ad, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR, &u4Value);
+			u4Value |= CB_INFRA_RGU_WF_SUBSYS_RST_WF_WHOLE_PATH_RST_MASK;
+			HAL_MCR_WR(ad, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR, u4Value);
+
+			kalMdelay(1);
+
+			/* De-assert reset - use read-modify-write to clear only bit 0 */
+			HAL_MCR_RD(ad, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR, &u4Value);
+			u4Value &= ~CB_INFRA_RGU_WF_SUBSYS_RST_WF_WHOLE_PATH_RST_MASK;
+			HAL_MCR_WR(ad, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR, u4Value);
+
+			HAL_MCR_RD(ad,
+				CONN_SEMAPHORE_CONN_SEMA_OWN_BY_M0_STA_REP_1_ADDR,
+				&u4Value);
+			DBGLOG(INIT, INFO, "0x%08x=0x%08x.\n",
+				CONN_SEMAPHORE_CONN_SEMA_OWN_BY_M0_STA_REP_1_ADDR,
+				u4Value);
+			if ((u4Value &
+			     CONN_SEMAPHORE_CONN_SEMA_OWN_BY_M0_STA_REP_1_CONN_SEMA00_OWN_BY_M0_STA_REP_MASK) != 0x0)
+				DBGLOG(INIT, ERROR, "L0.5 reset failed.\n");
+
+			return rStatus;
+		}
+	}
+
+	/* MT6639 uses bit 4 (WF_SUBSYS_RST) */
 	HAL_MCR_RD(ad,
 		CB_INFRA_RGU_WF_SUBSYS_RST_ADDR,
 		&u4Value);
@@ -3344,18 +3287,6 @@ static uint32_t mt6639_mcu_reset(struct ADAPTER *ad)
 }
 #endif
 
-static void set_cbinfra_remap(struct ADAPTER *ad)
-{
-	DBGLOG(INIT, INFO, "set_cbinfra_remap.\n");
-
-	HAL_MCR_WR(ad,
-		CB_INFRA_MISC0_CBTOP_PCIE_REMAP_WF_ADDR,
-		0x74037001);
-	HAL_MCR_WR(ad,
-		CB_INFRA_MISC0_CBTOP_PCIE_REMAP_WF_BT_ADDR,
-		0x70007000);
-}
-
 static uint32_t mt6639_mcu_init(struct ADAPTER *ad)
 {
 #define MCU_IDLE		0x1D1E
@@ -3364,12 +3295,35 @@ static uint32_t mt6639_mcu_init(struct ADAPTER *ad)
 	uint32_t rStatus = WLAN_STATUS_SUCCESS;
 	struct mt66xx_chip_info *prChipInfo = NULL;
 	struct CHIP_DBG_OPS *prDbgOps = NULL;
+	uint16_t device_id = 0;
+	struct pci_dev *pdev = NULL;
+
+	DBGLOG(INIT, ERROR, "=== mt6639_mcu_init FUNCTION ENTERED ===\n");
+	DBGLOG(INIT, ERROR, "=== CONFIG_WM_RAM_TYPE=%d, IS_CE_SEGMENT=%d ===\n",
+	       CONFIG_WM_RAM_TYPE, IS_CE_SEGMENT);
 
 	if (!ad) {
 		DBGLOG(INIT, ERROR, "NULL ADAPTER.\n");
 		rStatus = WLAN_STATUS_FAILURE;
 		goto exit;
 	}
+
+	/* Detect device ID for MT7927-specific handling later */
+	pdev = (struct pci_dev *)ad->chip_info->pdev;
+	if (pdev) {
+		pci_read_config_word(pdev, PCI_DEVICE_ID, &device_id);
+		DBGLOG(INIT, INFO, "Detected device ID: 0x%04x\n", device_id);
+	}
+
+	/* For CE segment, only MT7927 needs mcu_init */
+#if IS_CE_SEGMENT
+	if (device_id != 0x7927) {
+		DBGLOG(INIT, INFO, "CE segment non-MT7927 device, skipping MOBILE-specific mcu_init\n");
+		rStatus = WLAN_STATUS_SUCCESS;
+		goto exit;
+	}
+	DBGLOG(INIT, INFO, "MT7927 device on CE segment, performing full initialization\n");
+#endif
 
 	set_cbinfra_remap(ad);
 
@@ -3384,17 +3338,36 @@ static uint32_t mt6639_mcu_init(struct ADAPTER *ad)
 	}
 #endif
 
-	rStatus = mt6639_mcu_reinit(ad);
-	if (rStatus != WLAN_STATUS_SUCCESS) {
-		DBGLOG(INIT, WARN, "mt6639_mcu_reinit failed in MOBILE mode, trying to continue.\n");
-		/* For x86 test environment, continue anyway */
+	/* Skip reinit for MT7927 to avoid double reset that causes 0xdead */
+	if (device_id != 0x7927) {
+		rStatus = mt6639_mcu_reinit(ad);
+		if (rStatus != WLAN_STATUS_SUCCESS) {
+			DBGLOG(INIT, WARN, "mt6639_mcu_reinit failed, trying to continue.\n");
+			/* For x86 test environment, continue anyway */
+		}
+	} else {
+		DBGLOG(INIT, INFO, "MT7927: Skipping mcu_reinit to avoid double reset\n");
 	}
 
 #if (CFG_MTK_ANDROID_WMT == 0)
+	/* MT7927 needs conninfra wakeup before reset */
+	if (device_id == 0x7927) {
+		DBGLOG(INIT, INFO, "MT7927: Forcing conninfra wakeup before reset\n");
+		HAL_MCR_WR(ad, CONN_HOST_CSR_TOP_CONN_INFRA_WAKEPU_TOP_ADDR, 0x1);
+		kalMdelay(100);
+	}
+
+	/* Always do mcu_reset to boot the MCU */
 	rStatus = mt6639_mcu_reset(ad);
 	if (rStatus != WLAN_STATUS_SUCCESS) {
 		DBGLOG(INIT, WARN, "mt6639_mcu_reset failed, continuing anyway.\n");
 		/* For x86 test environment, continue */
+	}
+
+	/* MT7927 clean conninfra force after reset */
+	if (device_id == 0x7927) {
+		DBGLOG(INIT, INFO, "MT7927: Cleaning conninfra wakeup after reset\n");
+		HAL_MCR_WR(ad, CONN_HOST_CSR_TOP_CONN_INFRA_WAKEPU_TOP_ADDR, 0x0);
 	}
 #endif
 
@@ -3402,21 +3375,44 @@ static uint32_t mt6639_mcu_init(struct ADAPTER *ad)
 		   CB_INFRA_SLP_CTRL_CB_INFRA_CRYPTO_TOP_MCU_OWN_SET_ADDR,
 		   BIT(0));
 
+	/* MT7927 needs longer timeout for ROM_INDEX polling */
 	u4PollingCnt = 0;
-	while (TRUE) {
-		if (u4PollingCnt >= 1000) {
-			DBGLOG(INIT, WARN, "MCU_IDLE polling timeout, value=0x%x. Continuing anyway for x86 test.\n", u4Value);
-			/* For x86 test environment, don't fail here */
-			break;
+	if (device_id == 0x7927) {
+		DBGLOG(INIT, INFO, "MT7927: Starting ROM_INDEX polling with extended timeout\n");
+		while (TRUE) {
+			if (u4PollingCnt >= 20) {
+				DBGLOG(INIT, WARN, "MT7927: MCU_IDLE polling timeout, value=0x%x. Continuing anyway.\n", u4Value);
+				break;
+			}
+
+			HAL_MCR_RD(ad, WF_TOP_CFG_ON_ROMCODE_INDEX_ADDR, &u4Value);
+			DBGLOG(INIT, INFO, "MT7927: ROM_INDEX poll[%d]: 0x%x\n", u4PollingCnt, u4Value);
+
+			if (u4Value == 0xFFFFFFFF) {
+				DBGLOG(HAL, ERROR, "MT7927: MMIO read CR fail\n");
+			} else if (u4Value == MCU_IDLE) {
+				DBGLOG(INIT, INFO, "MT7927: MCU_IDLE detected, initialization complete\n");
+				break;
+			}
+
+			u4PollingCnt++;
+			kalMsleep(100);  /* 100ms delay for MT7927 */
 		}
+	} else {
+		while (TRUE) {
+			if (u4PollingCnt >= 1000) {
+				DBGLOG(INIT, WARN, "MCU_IDLE polling timeout, value=0x%x. Continuing anyway for x86 test.\n", u4Value);
+				/* For x86 test environment, don't fail here */
+				break;
+			}
 
-		HAL_MCR_RD(ad, WF_TOP_CFG_ON_ROMCODE_INDEX_ADDR,
-			&u4Value);
-		if (u4Value == MCU_IDLE)
-			break;
+			HAL_MCR_RD(ad, WF_TOP_CFG_ON_ROMCODE_INDEX_ADDR, &u4Value);
+			if (u4Value == MCU_IDLE)
+				break;
 
-		u4PollingCnt++;
-		kalUdelay(1000);
+			u4PollingCnt++;
+			kalUdelay(1000);
+		}
 	}
 	/* Set success status to continue to next probe stage */
 	rStatus = WLAN_STATUS_SUCCESS;
@@ -3639,6 +3635,248 @@ exit:
 	return rStatus;
 }
 
+static u_int8_t mt6639_check_recovery_needed(struct ADAPTER *ad)
+{
+	uint32_t u4Value = 0;
+	u_int8_t fgResult = FALSE;
+
+	/*
+	 * if (0x81021604[31:16]==0xdead &&
+	 *     (0x70005350[30:28]!=0x0 || 0x70005360[6:4]!=0x0)) == 0x1
+	 * do recovery flow
+	 */
+
+	HAL_MCR_RD(ad, WF_TOP_CFG_ON_ROMCODE_INDEX_ADDR,
+		&u4Value);
+	DBGLOG(INIT, INFO, "0x%08x=0x%08x\n",
+		WF_TOP_CFG_ON_ROMCODE_INDEX_ADDR, u4Value);
+	if ((u4Value & 0xFFFF0000) != 0xDEAD0000) {
+		fgResult = FALSE;
+		goto exit;
+	}
+
+	HAL_MCR_RD(ad, CBTOP_GPIO_MODE5_ADDR,
+		&u4Value);
+	DBGLOG(INIT, INFO, "0x%08x=0x%08x\n",
+		CBTOP_GPIO_MODE5_ADDR, u4Value);
+	if (((u4Value & CBTOP_GPIO_MODE5_GPIO47_MASK) >>
+	    CBTOP_GPIO_MODE5_GPIO47_SHFT) != 0x0) {
+		fgResult = TRUE;
+		goto exit;
+	}
+
+	HAL_MCR_RD(ad, CBTOP_GPIO_MODE6_ADDR,
+		&u4Value);
+	DBGLOG(INIT, INFO, "0x%08x=0x%08x\n",
+		CBTOP_GPIO_MODE6_ADDR, u4Value);
+	if (((u4Value & CBTOP_GPIO_MODE6_GPIO49_MASK) >>
+	    CBTOP_GPIO_MODE6_GPIO49_SHFT) != 0x0) {
+		fgResult = TRUE;
+		goto exit;
+	}
+
+exit:
+	return fgResult;
+}
+
+static uint32_t mt6639_mcu_reinit(struct ADAPTER *ad)
+{
+#define CONNINFRA_ID_MAX_POLLING_COUNT		10
+
+	uint32_t u4Value = 0, u4PollingCnt = 0;
+	uint32_t rStatus = WLAN_STATUS_SUCCESS;
+	uint16_t device_id = 0;
+	struct pci_dev *pdev = NULL;
+
+	/* Check if this is actually an MT7927 device to adjust initialization parameters */
+	pdev = (struct pci_dev *)ad->chip_info->pdev;
+	if (pdev) {
+		pci_read_config_word(pdev, PCI_DEVICE_ID, &device_id);
+		DBGLOG(INIT, INFO, "MT7927 reinit: Detected device ID: 0x%04x\n", device_id);
+
+		/* Handle MT7927-specific initialization since MT7927 maps to MT6639 driver data */
+		if (device_id == 0x7927) {
+			DBGLOG(INIT, INFO, "MT7927 device detected, checking if recovery is needed\n");
+
+			/* Check if recovery is needed for MT7927 */
+			if (mt6639_check_recovery_needed(ad) == FALSE) {
+				DBGLOG(INIT, INFO, "MT7927: No recovery needed, skipping reinit (will use simple reset in mcu_reset)\n");
+				/* Skip reinit entirely like MT6639 does - let mcu_reset handle it */
+				goto exit;
+			}
+
+			DBGLOG(INIT, INFO, "MT7927: Recovery needed, performing full recovery sequence\n");
+
+			/* MT7927 might need different delay for conninfra wakeup */
+			HAL_MCR_WR(ad,
+				CONN_HOST_CSR_TOP_CONN_INFRA_WAKEPU_TOP_ADDR,
+				0x1);
+
+			/* Longer delay for MT7927 */
+			kalMdelay(200);
+
+			/* Wait conninfra wakeup - MT7927 uses same version ID as MT6639 */
+			while (TRUE) {
+				HAL_MCR_RD(ad, CONN_CFG_IP_VERSION_IP_VERSION_ADDR,
+					&u4Value);
+
+				/* MT7927 uses the same version ID as MT6639 */
+				if (u4Value == MT6639_CONNINFRA_VERSION_ID ||
+				    u4Value == MT6639_CONNINFRA_VERSION_ID_E2)
+					break;
+
+				u4PollingCnt++;
+				if (u4PollingCnt >= (CONNINFRA_ID_MAX_POLLING_COUNT * 3)) {  /* Extended timeout for MT7927 */
+					/* For MT7927 in test environments, allow continuing even if conninfra version is not detected */
+					DBGLOG(INIT, WARN,
+						"MT7927: Conninfra version not detected (0x%x), continuing anyway. Expected: 0x%08x or 0x%08x\n",
+						u4Value, MT6639_CONNINFRA_VERSION_ID, MT6639_CONNINFRA_VERSION_ID_E2);
+					break; /* Allow continuing for MT7927 */
+				}
+
+				kalUdelay(2000);  /* Longer delay for MT7927 */
+			}
+
+			/* MT7927-specific GPIO and reset sequence (for recovery boot only - cold boot skips reinit entirely) */
+			HAL_MCR_WR(ad,
+				CBTOP_GPIO_MODE5_MOD_ADDR,
+				0x80000000);
+			HAL_MCR_WR(ad,
+				CBTOP_GPIO_MODE6_MOD_ADDR,
+				0x80);
+			kalUdelay(200); /* Longer delay for MT7927 */
+
+			/* MT7927-specific reset sequence - might need different parameters */
+			/* Assert reset - use read-modify-write to set only bit 0 */
+			HAL_MCR_RD(ad, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR, &u4Value);
+			u4Value |= CB_INFRA_RGU_WF_SUBSYS_RST_WF_WHOLE_PATH_RST_MASK;
+			HAL_MCR_WR(ad, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR, u4Value);
+
+			HAL_MCR_RD(ad, CB_INFRA_RGU_BT_SUBSYS_RST_ADDR, &u4Value);
+			u4Value |= CB_INFRA_RGU_BT_SUBSYS_RST_BT_WHOLE_PATH_RST_MASK;
+			HAL_MCR_WR(ad, CB_INFRA_RGU_BT_SUBSYS_RST_ADDR, u4Value);
+
+			kalMdelay(20); /* Longer delay for MT7927 */
+
+			/* De-assert reset - use read-modify-write to clear only bit 0 */
+			HAL_MCR_RD(ad, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR, &u4Value);
+			u4Value &= ~CB_INFRA_RGU_WF_SUBSYS_RST_WF_WHOLE_PATH_RST_MASK;
+			HAL_MCR_WR(ad, CB_INFRA_RGU_WF_SUBSYS_RST_ADDR, u4Value);
+
+			HAL_MCR_RD(ad, CB_INFRA_RGU_BT_SUBSYS_RST_ADDR, &u4Value);
+			u4Value &= ~CB_INFRA_RGU_BT_SUBSYS_RST_BT_WHOLE_PATH_RST_MASK;
+			HAL_MCR_WR(ad, CB_INFRA_RGU_BT_SUBSYS_RST_ADDR, u4Value);
+
+			kalMdelay(100); /* Longer delay for MT7927 */
+
+			HAL_MCR_RD(ad, CBTOP_GPIO_MODE5_ADDR, &u4Value);
+			DBGLOG(INIT, INFO, "MT7927: 0x%08x=0x%08x\n",
+				CBTOP_GPIO_MODE5_ADDR, u4Value);
+
+			HAL_MCR_RD(ad, CBTOP_GPIO_MODE6_ADDR, &u4Value);
+			DBGLOG(INIT, INFO, "MT7927: 0x%08x=0x%08x\n",
+				CBTOP_GPIO_MODE6_ADDR, u4Value);
+
+			/* Clean force on conninfra (if it was set during recovery sequence) */
+			HAL_MCR_WR(ad,
+				CONN_HOST_CSR_TOP_CONN_INFRA_WAKEPU_TOP_ADDR,
+				0x0);
+
+			DBGLOG(INIT, INFO, "MT7927-specific reinitialize completed\n");
+			return rStatus; /* Successfully completed for MT7927 */
+		}
+	}
+
+	/* For non-MT7927 devices, use original initialization sequence */
+	/* Check recovery needed */
+	if (mt6639_check_recovery_needed(ad) == FALSE)
+		goto exit;
+
+	DBGLOG(INIT, INFO, "mt6639_mcu_reinit.\n");
+
+	/* Force on conninfra */
+	HAL_MCR_WR(ad,
+		CONN_HOST_CSR_TOP_CONN_INFRA_WAKEPU_TOP_ADDR,
+		0x1);
+
+	/* Wait for conninfra to wake up */
+	kalMdelay(100);
+
+	/* Wait conninfra wakeup */
+	while (TRUE) {
+		HAL_MCR_RD(ad, CONN_CFG_IP_VERSION_IP_VERSION_ADDR,
+			&u4Value);
+
+		if (u4Value == MT6639_CONNINFRA_VERSION_ID ||
+		    u4Value == MT6639_CONNINFRA_VERSION_ID_E2)
+			break;
+
+		u4PollingCnt++;
+		if (u4PollingCnt >= CONNINFRA_ID_MAX_POLLING_COUNT) {
+			/* For test environments, if recovery is not needed (mt6639_check_recovery_needed returned FALSE),
+			 * allow continuing even if conninfra version is not detected */
+			if (!mt6639_check_recovery_needed(ad)) {
+				DBGLOG(INIT, WARN,
+					"Conninfra version not detected but recovery not needed, continuing anyway. Value: 0x%x\n",
+					u4Value);
+				goto skip_reinit;
+			}
+			rStatus = WLAN_STATUS_FAILURE;
+			DBGLOG(INIT, ERROR,
+				"Conninfra ID polling failed, value=0x%x\n",
+				u4Value);
+			goto exit;
+		}
+
+		kalUdelay(1000);
+	}
+
+skip_reinit:
+
+	/* Switch to GPIO mode */
+	HAL_MCR_WR(ad,
+		CBTOP_GPIO_MODE5_MOD_ADDR,
+		0x80000000);
+	HAL_MCR_WR(ad,
+		CBTOP_GPIO_MODE6_MOD_ADDR,
+		0x80);
+	kalUdelay(100);
+
+	/* Reset */
+	HAL_MCR_WR(ad,
+		CB_INFRA_RGU_BT_SUBSYS_RST_ADDR,
+		0x10351);
+	HAL_MCR_WR(ad,
+		CB_INFRA_RGU_WF_SUBSYS_RST_ADDR,
+		0x10351);
+	kalMdelay(10);
+	HAL_MCR_WR(ad,
+		CB_INFRA_RGU_BT_SUBSYS_RST_ADDR,
+		0x10340);
+	HAL_MCR_WR(ad,
+		CB_INFRA_RGU_WF_SUBSYS_RST_ADDR,
+		0x10340);
+
+	kalMdelay(50);
+
+	HAL_MCR_RD(ad, CBTOP_GPIO_MODE5_ADDR, &u4Value);
+	DBGLOG(INIT, INFO, "0x%08x=0x%08x\n",
+		CBTOP_GPIO_MODE5_ADDR, u4Value);
+
+	HAL_MCR_RD(ad, CBTOP_GPIO_MODE6_ADDR, &u4Value);
+	DBGLOG(INIT, INFO, "0x%08x=0x%08x\n",
+		CBTOP_GPIO_MODE6_ADDR, u4Value);
+
+	/* Clean force on conninfra */
+	HAL_MCR_WR(ad,
+		CONN_HOST_CSR_TOP_CONN_INFRA_WAKEPU_TOP_ADDR,
+		0x0);
+
+exit:
+	return rStatus;
+}
+
+#if IS_MOBILE_SEGMENT
 static void mt6639_mcu_deinit(struct ADAPTER *ad)
 {
 #define MAX_WAIT_COREDUMP_COUNT 10

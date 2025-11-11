@@ -3719,8 +3719,45 @@ uint32_t wlanSetChipEcoInfo(struct ADAPTER *prAdapter)
 	uint32_t hw_version = 0, sw_version = 0;
 	struct mt66xx_chip_info *prChipInfo = prAdapter->chip_info;
 	uint32_t chip_id = prChipInfo->chip_id;
+	uint16_t device_id = 0;
+	struct pci_dev *pdev = NULL;
 	/* WLAN_STATUS status; */
 	uint32_t u4Status = WLAN_STATUS_SUCCESS;
+
+	/* Check if this is actually an MT7927 device to adjust register access method */
+	pdev = (struct pci_dev *)prAdapter->prGlueInfo->rHifInfo.pdev;
+	if (pdev) {
+		pci_read_config_word(pdev, PCI_DEVICE_ID, &device_id);
+		DBGLOG(INIT, INFO, "wlanSetChipEcoInfo: Detected device ID: 0x%04x\n", device_id);
+		
+		/* If this is MT7927, use direct register read instead of in-band command */
+		if (device_id == 0x7927) {
+			DBGLOG(INIT, INFO, "MT7927 detected, using direct register access for TOP_HVR/TOP_FVR\n");
+			
+			/* MT7927 firmware might not respond to in-band commands at this stage, 
+			 * so try direct register access */
+			HAL_MCR_RD(prAdapter, prChipInfo->top_hvr, &hw_version);
+			HAL_MCR_RD(prAdapter, prChipInfo->top_fvr, &sw_version);
+
+			if ((hw_version == 0) || (sw_version == 0)) {
+				DBGLOG(INIT, ERROR,
+				  "MT7927: Cannot get TOP_HVR(0x%x)/TOP_FVR(0x%x) via direct access\n",
+				  hw_version, sw_version);
+				u4Status = WLAN_STATUS_FAILURE;
+			} else {
+				/* success */
+				nicSetChipHwVer((uint8_t)(GET_HW_VER(hw_version) & 0xFF));
+				nicSetChipFactoryVer((uint8_t)((GET_HW_VER(hw_version) >> 8) &
+					     0xF));
+				nicSetChipSwVer((uint8_t)GET_FW_VER(sw_version));
+
+				/* Assign current chip version */
+				prAdapter->chip_info->eco_ver = nicGetChipEcoVer(prAdapter);
+			}
+			
+			goto exit_log;
+		}
+	}
 
 #if (CFG_DIRECT_READ_CHIP_INFO == 1)
 	HAL_RMCR_RD(ONOFF_READ, prAdapter, prChipInfo->top_hvr, &hw_version);
@@ -3754,8 +3791,11 @@ uint32_t wlanSetChipEcoInfo(struct ADAPTER *prAdapter)
 
 		/* Assign current chip version */
 		prAdapter->chip_info->eco_ver = nicGetChipEcoVer(prAdapter);
+		/* Assign current chip version */
+		prAdapter->chip_info->eco_ver = nicGetChipEcoVer(prAdapter);
 	}
 
+exit_log:
 	DBGLOG(INIT, INFO,
 	       "Chip ID[%04X] Version[E%u] HW[0x%08x] SW[0x%08x]\n",
 	       chip_id, prAdapter->chip_info->eco_ver, hw_version,
