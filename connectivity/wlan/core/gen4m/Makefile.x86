@@ -126,10 +126,10 @@ endif
 
 #/***** Manage configs into compile options ******/
 # Manage configs into compile options
-PLATFORM_FLAGS += -I/home/zyh/mt7927-test/connectivity/common/common_main/include
-PLATFORM_FLAGS += -I/home/zyh/mt7927-test/connectivity/common/common_main/linux/include
-PLATFORM_FLAGS += -I/home/zyh/mt7927-test/connectivity/common/debug_utility
-PLATFORM_FLAGS += -I/home/zyh/mt7927-test/connectivity/conninfra/include
+PLATFORM_FLAGS += -I../../../common/common_main/include
+PLATFORM_FLAGS += -I../../../common/common_main/linux/include
+PLATFORM_FLAGS += -I../../../common/debug_utility
+PLATFORM_FLAGS += -I../../../conninfra/include
 PLATFORM_FLAGS += -Wno-error=missing-prototypes
 PLATFORM_FLAGS += -Wno-error=empty-body
 PLATFORM_FLAGS += -Wno-error=incompatible-pointer-types
